@@ -1,0 +1,43 @@
+# Single-node HydraDB for local development.
+#
+# Three settings below are load-bearing and are the difference between a node that works and one
+# that looks healthy and then dies:
+#
+#   user: "1000:1000"      The image runs as UID/GID 10001, but ./hydradb-data is owned by the host
+#                          user. Without this the container cannot write its store or cache and
+#                          fails on the first storage operation.
+#   RUST_MIN_STACK         graph-node's async query futures exceed the default thread stack. Without
+#                          this the node builds, answers /readyz, and then aborts with a stack
+#                          overflow on the first query.
+#   LOCAL_PATH             Must point at a directory that already exists, which is why the store and
+#                          cache directories are created before the container starts (see `make up`).
+#
+# GRAPH_ALLOW_PLAINTEXT is set because TLS is required by default in deployed environments; this is
+# a local development node only.
+
+services:
+  hydradb:
+    image: ghcr.io/hydra-db/hydradb:latest
+    container_name: keyholders-hydradb
+    user: "1000:1000"
+    ports:
+      - "7687:7687" # Bolt  — Neo4j-driver-compatible
+      - "8443:8443" # HTTP  — JSON / NDJSON query API
+      - "9090:9090" # Admin — /readyz, /metrics
+    volumes:
+      - ./hydradb-data:/data
+    environment:
+      CLOUD_PROVIDER: local
+      LOCAL_PATH: /data/store
+      GRAPH_NAMESPACE: default
+      GRAPH_ID: default
+      GRAPH_CELL_ID: cell-0
+      GRAPH_CELLS: cell-0
+      GRAPH_NODE_ID: node-0
+      GRAPH_BOLT_NODE_ADDRESSES: node-0=127.0.0.1:7687
+      GRAPH_ADVERTISED_BOLT_ADDR: 127.0.0.1:7687
+      GRAPH_DATA_CACHE_DIR: /data/cache
+      GRAPH_AUTH_TOKEN_FILE: /data/auth-token
+      GRAPH_ALLOW_PLAINTEXT: "true"
+      RUST_MIN_STACK: "33554432"
+    restart: unless-stopped

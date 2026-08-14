@@ -1,0 +1,32 @@
+# HydraDB local state
+deploy/hydradb-data/
+
+# Registry response cache
+.cache/
+
+# Build output
+/bin/
+/dist/
+keyholders
+
+# Go
+*.test
+*.out
+coverage.*
+
+# Node
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+.eslintcache
+
+# Environment
+.env
+.env.local
+
+# Editor and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
