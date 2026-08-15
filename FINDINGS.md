@@ -343,6 +343,54 @@ Both are documented in the HydraDB README and both are easy to skip past.
 
 Startup is quick: `/readyz` returned 200 one to two seconds after container start.
 
+## 17. `resultLimit` truncates silently, with no error and no cursor
+
+`algo.MSpaths` returning fewer paths than exist is indistinguishable from it returning all of them:
+
+```cypher
+CALL algo.MSpaths({..., resultLimit: 5}) YIELD path RETURN path
+```
+
+on a source with 17 outgoing edges returns exactly 5 rows, `next_cursor: null`, and no error or
+warning. The same call with a generous limit returns all 17.
+
+For a traversal this is the dangerous direction. A frontier expansion that quietly loses edges
+produces an undercount, and an undercounted answer to "who can execute code on your machine" looks
+exactly like a good result.
+
+We treat a full result set as evidence of possible truncation: when a call returns exactly
+`resultLimit` rows and had more than one source, the source list is split in half and both halves are
+re-run. That costs one extra query in the rare exact-fit case and removes the failure mode entirely.
+
+**Suggestion.** Either populate `next_cursor` when results were cut, or return a flag saying so.
+Pagination state already exists for this procedure, so the information is present; it just is not
+surfaced on the truncating path.
+
+## 18. Returned paths carry full relationship properties, which is what makes client-side interval logic possible
+
+A positive finding, and the one that decided the query design.
+
+`YIELD path` returns nodes with all their properties *and* relationships with all of theirs:
+
+```json
+{"id": 550393, "edge_type": "RESOLVES_TO",
+ "src": 6033986735605758548, "dst": 289911684998391487,
+ "properties": {"range": {"String": "^2.1.3"},
+                "valid_from": {"Integer": 1743039553},
+                "valid_to": {"Integer": 4102444800}}}
+```
+
+This matters because interval intersection cannot be expressed in this Cypher subset. Since the
+procedure hands back every edge's validity window, the intersection is done in the client over data
+the graph already returned, rather than needing a procedure that does not exist. The same property
+makes `MSpaths` usable as a batched one-hop frontier expander with `maxLen: 1`, which is what turns a
+frontier of hundreds of nodes into a single query.
+
+One restriction worth knowing: `fairRelationshipVariants` is rejected outside `pairwise` mode
+(`fairRelationshipVariants is only supported by pairwise algo.MSpaths`), and pairwise matches sources
+to targets by position rather than searching every source for every target, so the two cannot be
+combined for a many-sources-one-target proof path query.
+
 ---
 
 ## What we changed in our design because of these
@@ -357,3 +405,5 @@ Startup is quick: `/readyz` returned 200 one to two seconds after container star
 | 10, 11, 12 | Every read is anchored at a known node id, and whole-graph work is driven from our own lists rather than from a scan. The resolver is organised by dependency target so that inbound traversal does the work. We keep our own counters |
 | 13 | One cell. Sharding is not pursued |
 | 15 | Every write consumes its result. A benchmark that does not is measuring the client |
+| 17 | A result set that exactly fills `resultLimit` is treated as truncated and the source list is split. Silent undercounting is the one failure a reachability query must not have |
+| 18 | Interval intersection happens in the client, over the edge properties the path already carries. `MSpaths` with `maxLen: 1` is the batched frontier expander the interval search runs on |
