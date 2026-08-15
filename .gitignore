@@ -1,13 +1,14 @@
 # HydraDB local state
 deploy/hydradb-data/
 
-# Registry response cache
+# Registry response cache and ingest checkpoints
 .cache/
+/var/
 
-# Build output
+# Build output. The binary name is anchored to the root, or it also matches cmd/keyholders/.
 /bin/
 /dist/
-keyholders
+/keyholders
 
 # Go
 *.test
