@@ -1,4 +1,6 @@
-package ingest
+// Package checkpoint records which units of work have been committed, so an interrupted run resumes
+// rather than starting over.
+package checkpoint
 
 import (
 	"bufio"
@@ -8,19 +10,20 @@ import (
 	"sync"
 )
 
-// checkpoint records which packages have been written, so an interrupted run resumes rather than
-// starting over. It is a plain append-only list of names: the ingest is idempotent, since every
-// write is a MERGE keyed by a deterministic id, so the worst a duplicate costs is a repeated write.
+// File is a plain append-only list of completed names. Both passes that use it are idempotent,
+// since every write is a MERGE keyed by a deterministic id, so the worst a duplicate costs is a
+// repeated write.
 //
-// Correctness rests on ordering. A package is recorded only after its rows have been flushed and
+// Correctness rests on ordering. A name is recorded only after its rows have been flushed and
 // acknowledged, so a crash can lose the record of work that was done, never claim work that was not.
-type checkpoint struct {
+type File struct {
 	mu   sync.Mutex
 	file *os.File
 	done map[string]bool
 }
 
-func openCheckpoint(path string) (*checkpoint, error) {
+// Open reads any existing checkpoint at path and opens it for appending.
+func Open(path string) (*File, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create checkpoint dir: %w", err)
 	}
@@ -50,18 +53,19 @@ func openCheckpoint(path string) (*checkpoint, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open checkpoint %s for append: %w", path, err)
 	}
-	return &checkpoint{file: f, done: done}, nil
+	return &File{file: f, done: done}, nil
 }
 
-func (c *checkpoint) has(name string) bool {
+// Has reports whether a name was already committed.
+func (c *File) Has(name string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.done[name]
 }
 
-// record marks a package complete and flushes it to disk immediately. Buffering would make the
-// checkpoint claim more progress than the graph holds after a kill.
-func (c *checkpoint) record(names []string) error {
+// Record marks names complete and flushes to disk immediately. Buffering would make the checkpoint
+// claim more progress than the graph holds after a kill.
+func (c *File) Record(names []string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -74,13 +78,14 @@ func (c *checkpoint) record(names []string) error {
 	return c.file.Sync()
 }
 
-func (c *checkpoint) count() int {
+// Count is how many names have been committed across all runs.
+func (c *File) Count() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.done)
 }
 
-func (c *checkpoint) Close() error {
+func (c *File) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.file.Close()

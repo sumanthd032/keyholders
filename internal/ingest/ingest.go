@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sumanthd032/keyholders/internal/checkpoint"
 	"github.com/sumanthd032/keyholders/internal/graph"
 	"github.com/sumanthd032/keyholders/internal/registry"
 )
@@ -86,7 +87,7 @@ func New(reg *registry.Client, db *graph.Client, opts Options, log io.Writer) *I
 // Run ingests every named package, resuming from the checkpoint in stateDir. Names are expected in
 // rank order, most downloaded first, because the rank is written onto the node.
 func (i *Ingester) Run(ctx context.Context, names []string, stateDir string) (Stats, error) {
-	cp, err := openCheckpoint(filepath.Join(stateDir, "ingest.checkpoint"))
+	cp, err := checkpoint.Open(filepath.Join(stateDir, "ingest.checkpoint"))
 	if err != nil {
 		return Stats{}, err
 	}
@@ -131,7 +132,7 @@ func (i *Ingester) Run(ctx context.Context, names []string, stateDir string) (St
 	go func() {
 		defer close(jobs)
 		for rank, name := range names {
-			if cp.has(name) {
+			if cp.Has(name) {
 				i.mu.Lock()
 				i.stats.Skipped++
 				i.mu.Unlock()
@@ -173,7 +174,7 @@ type packageRows struct {
 // so a package contributing three rows does not cause a three-row statement.
 const flushAt = 2048
 
-func (i *Ingester) writeLoop(ctx context.Context, results <-chan *packageRows, cp *checkpoint) error {
+func (i *Ingester) writeLoop(ctx context.Context, results <-chan *packageRows, cp *checkpoint.File) error {
 	var pending rows
 	var names []string
 	lastLog := time.Now()
@@ -185,7 +186,7 @@ func (i *Ingester) writeLoop(ctx context.Context, results <-chan *packageRows, c
 		if err := i.write(ctx, &pending); err != nil {
 			return err
 		}
-		if err := cp.record(names); err != nil {
+		if err := cp.Record(names); err != nil {
 			return err
 		}
 		pending.reset()
@@ -209,7 +210,7 @@ func (i *Ingester) writeLoop(ctx context.Context, results <-chan *packageRows, c
 			}
 		}
 		if time.Since(lastLog) > 5*time.Second {
-			i.progress(done, cp.count())
+			i.progress(done, cp.Count())
 			lastLog = time.Now()
 		}
 	}
