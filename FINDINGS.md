@@ -1,40 +1,64 @@
 # HydraDB findings
 
 Behaviour we measured while building Keyholders against HydraDB `ghcr.io/hydra-db/hydradb:latest`
-(digest `sha256:db78309a`), single node, `CLOUD_PROVIDER=local`, one cell.
+(digest `sha256:db78309a`), single node, one cell.
 
 Several of these behaviours are not documented, and a few are surprising enough that we would have
 designed around them incorrectly if we had assumed rather than measured. Every entry below is
 reproducible with `go run ./cmd/probe`, which is kept in the tree for exactly that reason.
 
-Nothing here is a complaint. HydraDB is at `0.1.0` and the limits are mostly deliberate admission
+Nothing here is a complaint. HydraDB is at `0.1.0` and most of these limits are deliberate admission
 control doing its job. What follows is the shape of the envelope as we found it.
+
+**Storage backend.** Findings 1 to 12 were first taken against `CLOUD_PROVIDER=local`. Finding 1
+explains why that configuration cannot be used for anything durable, and every number here has since
+been re-measured against MinIO, which is what `deploy/docker-compose.yml` now runs.
 
 ---
 
-## 1. Bolt authentication accepts any non-empty username
+## 1. The local object store cannot do conditional puts, so writes die permanently once the store grows
 
-Not documented. The auth token is validated as the **password**, and the username is ignored provided
-it is not empty.
+This is the finding with the largest consequence, and the one that is hardest to diagnose from the
+client, because **reads keep working perfectly while every write fails.**
 
-| Credential | Result |
-|---|---|
-| `BasicAuth("neo4j", token, "")` | accepted |
-| `BasicAuth("hydradb", token, "")` | accepted |
-| `BasicAuth(token, token, "")` | accepted |
-| `BearerAuth(token)` | accepted |
-| `CustomAuth("bearer", "", token, "", nil)` | accepted |
-| `BasicAuth("", token, "")` | rejected, `Neo.ClientError.Security.Unauthorized` |
-| `NoAuth()` | rejected, `Neo.ClientError.Security.Unauthorized` |
+With `CLOUD_PROVIDER=local`, SlateDB's object store is `object_store`'s `LocalFileSystem`, which
+returns `NotImplemented` for a compare-and-swap put:
 
-We use `BasicAuth("neo4j", token, "")` because it is what third party Neo4j tooling expects.
+```
+object store error: Operation `put_opts` with mode `PutMode::Update`
+not yet implemented by LocalFileSystem(file:///data/store).
+```
 
-**Note for anyone probing this.** `VerifyConnectivity` is not sufficient to test a credential. The
-driver defers the handshake, so a bad credential is only reported at first statement execution. The
-probe runs a real query per candidate.
+A fresh store works. It keeps working across restarts. Then, once enough data has been written that
+SlateDB needs to rotate its manifest, every subsequent write fails with:
 
-**Suggestion.** Documenting the expected credential shape, or rejecting an obviously wrong username,
-would save the next person an hour.
+```
+Neo.DatabaseError.General.UnknownError (internal query execution error)
+```
+
+That error names nothing. The real cause appears only in the container log, as a `WARN` reading
+`Bolt suppressed internal graph error`. Background garbage collection announces the same problem
+minutes earlier, once per minute, which is the only advance warning:
+
+```
+error collecting garbage [resource=Manifest,
+  error=ObjectStoreError(NotImplemented { operation: "`put_opts` with mode `PutMode::Update`" })]
+```
+
+**Reproduction.** Start with `CLOUD_PROVIDER=local`, write a few hundred thousand edges, restart the
+node, then attempt any write. Reads succeed, writes fail, and the store never recovers.
+
+**Fix.** Run an S3-compatible object store. `deploy/docker-compose.yml` runs MinIO with
+`AWS_CONDITIONAL_PUT=etag`, which is the configuration the engine is designed against. Storage is
+selected by `CLOUD_PROVIDER`, accepting `local`, `memory`, `aws`, `azure` and `gcp`; the `aws` path
+builds its client from the standard `AWS_*` environment, so any S3-compatible endpoint works.
+
+**Suggestion.** Two things would each have saved a day here. First, surface the underlying object
+store error to the client instead of replacing it with `UnknownError`, or at least log it at `ERROR`
+rather than `WARN`. Second, refuse to start with `CLOUD_PROVIDER=local` unless the store advertises
+conditional put, since a configuration that works until it silently stops is worse than one that
+never starts. The README's Docker quickstart uses `CLOUD_PROVIDER=local`, which is the shortest path
+to this failure.
 
 ## 2. UNWIND batches are capped at 1024 rows, and the error names memory
 
@@ -56,9 +80,10 @@ Two things make this costly to discover:
    fixed row count and is unrelated to available memory.
 2. Ingest throughput is usually tuned by raising batch size, and here that direction is closed.
 
-**Suggestion.** An environment override for `max_parameters` would be valuable, since bulk load
-throughput is bounded by it. A distinct error class such as `LimitExceeded` would also be clearer than
-one naming a memory pool.
+In practice the ceiling turned out not to bind, because throughput peaks well below it (finding 8).
+
+**Suggestion.** A distinct error class such as `LimitExceeded` would be clearer than one naming a
+memory pool.
 
 ## 3. Composite parameters are rejected outside UNWIND, which affects `algo.MSpaths`
 
@@ -107,73 +132,90 @@ Cypher surface, yet the path procedures resolve `sourceProperty` and `sourceValu
 documentation calls indexed selectors. If that were a scan, selector latency would grow with label
 size and our design would have needed rethinking.
 
-It is indexed. Measured over 25 calls each, looking up a value deliberately placed near the end of the
+It is indexed. `algo.MSpaths` by `urn`, looking up a value deliberately placed near the end of the
 range:
 
-| Query | Label size | Latency |
-|---|---|---|
-| `MSpaths` by `urn` property | 40,000 nodes | **0.40 ms** |
-| `MSpaths` by `urn` property | 1,000 nodes | **0.36 ms** |
-| `SSpaths` by integer node id | 40,000 nodes | 0.35 ms |
+| Label size | Latency |
+|---|---|
+| 2,000 nodes | 5.5 ms |
+| 10,000 nodes | 3.9 ms |
+| 40,000 nodes | **5.4 ms** |
 
-Forty times the nodes for eleven percent more time. Property selectors cost effectively the same as a
-direct id lookup, with no index declaration required.
+Twenty times the nodes for no measurable change. Selector resolution costs effectively the same at
+any size we tested, with no index declaration required.
 
 ## 6. `algo.MSpaths` amortises across sources as documented
 
 The claim that `MSpaths` shares selector hydration, topology and adjacency across source and target
-pairs holds up:
-
-| Inline `sourceValues` | Total | Per source |
-|---|---|---|
-| 1 | 0.40 ms | 0.40 ms |
-| 50 | 3.60 ms | 0.072 ms |
-| 500 | 7.26 ms | **0.015 ms** |
-
-Ten times the sources for twice the wall clock. This is the single most useful performance property we
-found, and it is what makes returning a proof path per keyholder affordable.
+pairs holds up: ten times the sources costs roughly twice the wall clock, so the per-source cost
+falls by about 5x between one source and five hundred. This is what makes returning a proof path per
+keyholder affordable.
 
 ## 7. Writes are serialised, so concurrency does not raise throughput
 
-60,000 edges written as `UNWIND MATCH ... CREATE`, one cell:
+60,000 edges written as `UNWIND MATCH ... MERGE`, one cell:
 
 | Batch | Workers | Edges/sec |
 |---|---|---|
-| 256 | 1 | 4,178 |
-| 1024 | 1 | 3,213 |
-| 1024 | 4 | 2,830 |
-| 1024 | 8 | 2,888 |
-| 1024 | 16 | 3,155 |
+| 256 | 1 | **4,426** |
+| 1024 | 1 | 3,354 |
+| 1024 | 4 | 3,159 |
+| 1024 | 8 | 3,536 |
+| 1024 | 16 | 2,911 |
 
-Four, eight and sixteen concurrent sessions perform no better than one. This is consistent with the
-documented design, where a durable writer lease selects one active writer per cell, so all sessions
-against a single cell contend for the same writer. Worth stating explicitly for anyone planning a bulk
-load: **parallel client sessions are not a throughput lever.**
+Four, eight and sixteen concurrent sessions perform no better than one, and sixteen is measurably
+worse. This is consistent with the documented design, where a durable writer lease selects one active
+writer per cell, so all sessions against a single cell contend for the same writer. Worth stating
+explicitly for anyone planning a bulk load: **parallel client sessions are not a throughput lever.**
 
-Batch size sweep at a larger graph size, 24,000 edges each:
+## 8. Batch size has an optimum, and it moves with graph size
 
-| Batch | Edges/sec | us/edge |
-|---|---|---|
-| 32 | 2,024 | 494 |
-| 64 | 2,154 | 464 |
-| 128 | **2,191** | **456** |
-| 256 | 2,124 | 471 |
-| 512 | 1,970 | 508 |
-| 1024 | 1,840 | 544 |
+At 6,000 edges on a small graph, 1024 rows is fastest at 8,343 edges/sec against 5,844 at 256. At
+60,000 edges on a graph large enough to be compacting, the order reverses: 4,426 at 256 against 3,354
+at 1024.
 
-The optimum is broad and sits around 128 rows. Larger batches are consistently worse, which combined
-with finding 2 means the useful range is narrow.
+Tuning batch size on a small graph therefore picks the wrong answer. We use 256, from the larger run.
 
-## 8. Write throughput degrades as the graph grows
+Sustained throughput is about **3,400 to 4,400 edges/sec** on this hardware, degrading as the graph
+grows. We plan on 3,500 and treat further degradation as expected rather than surprising.
 
-The same batch size of 256 measured 4,178 edges/sec early and 2,124 edges/sec after roughly 600,000
-more edges existed. Planning on a number taken from an empty graph would have been optimistic by about
-two times.
+## 9. An UNWIND batch cannot assign two different values to the same vertex property
 
-We plan on **2,000 edges/sec sustained**, and treat further degradation as expected rather than
-surprising.
+```cypher
+UNWIND $rows AS row MERGE (n {id: row.vertex}) SET n:Dup, n.rank = row.rank
+```
 
-## 9. Label scans are capped at 250,000 candidates
+with rows `[{vertex: 1, rank: 1}, {vertex: 1, rank: 0}]` fails:
+
+```
+Neo.ClientError.Statement.InvalidSyntax
+GraphQuery query is not supported yet: conflicting metadata values for vertex 1 property rank
+```
+
+The exact rule, established by probing each case separately:
+
+| Case | Result |
+|---|---|
+| Same vertex twice, identical value | accepted |
+| Same vertex twice, different values | **rejected, whole statement fails** |
+| Distinct vertices | accepted |
+| Same vertex, different values, separate statements | accepted, last write wins |
+
+This is easy to hit in a bulk load, because the natural way to write a graph is to emit a node row
+wherever the node is mentioned, and two mentions can legitimately carry different detail. Ours did:
+a package in the ranked input list carries a download rank, and the same package reached as somebody
+else's dependency does not.
+
+It also fails the whole batch rather than the offending row, so one conflicting pair loses the other
+255 rows with it.
+
+We fixed it by writing the two cases with separate statements, so the property that can differ
+appears in only one of them, and by deduplicating rows by vertex id before each write.
+
+**Suggestion.** Naming the two conflicting values in the error would make this a one minute fix
+rather than a bisect. `InvalidSyntax` is also a slightly misleading class for a data condition.
+
+## 10. Label scans are capped at 250,000 candidates
 
 ```cypher
 MATCH (n:Tp) RETURN count(*)
@@ -185,7 +227,7 @@ A label with more than 250,000 nodes cannot be scanned or counted by a plain `MA
 limit with the largest design consequence for us, because any whole graph pass has to be expressed as
 bounded pages rather than a scan.
 
-## 10. A full edge type count exceeds the query timeout
+## 11. A full edge type count exceeds the query timeout
 
 ```cypher
 MATCH ()-[r:TP]->() RETURN count(*)
@@ -197,10 +239,11 @@ Roughly 300,000 edges of one type could not be counted inside the 29,999 ms budg
 failed in `cypher_relationship_metadata_hydration` instead, so the cost is in hydration rather than in
 enumeration.
 
-Findings 9 and 10 together mean **there is no cheap way to ask how big the graph is**, which is mildly
-awkward for progress reporting during a bulk load. We maintain our own counters instead.
+Findings 10 and 11 together mean **there is no cheap way to ask how big the graph is**, which is
+mildly awkward for progress reporting during a bulk load. The ingest maintains its own counters
+instead.
 
-## 11. Bolt cannot select a cell
+## 12. Bolt cannot select a cell
 
 `SessionConfig.DatabaseName` selects the graph, not the cell:
 
@@ -215,12 +258,48 @@ Cell targeting is available over HTTP, where `cell_id` is a request body field, 
 Combined with finding 7, sharding a bulk load across cells would require several `graph-node`
 processes, and queries would then be unable to traverse across them, so we did not pursue it.
 
-## 12. Storage footprint
+## 13. Bolt authentication accepts any non-empty username
 
-981 MB on disk for roughly 500,000 edges and 400,000 nodes, before compaction settled. Container
-resident memory grew from 43 MB at idle to 1.4 GB after the write benchmarks.
+Not documented. The auth token is validated as the **password**, and the username is ignored provided
+it is not empty.
 
-## 13. Two operational notes that cost time elsewhere
+| Credential | Result |
+|---|---|
+| `BasicAuth("neo4j", token, "")` | accepted |
+| `BasicAuth("hydradb", token, "")` | accepted |
+| `BasicAuth(token, token, "")` | accepted |
+| `BearerAuth(token)` | accepted |
+| `CustomAuth("bearer", "", token, "", nil)` | accepted |
+| `BasicAuth("", token, "")` | rejected, `Neo.ClientError.Security.Unauthorized` |
+| `NoAuth()` | rejected, `Neo.ClientError.Security.Unauthorized` |
+
+We use `BasicAuth("neo4j", token, "")` because it is what third party Neo4j tooling expects.
+
+**Note for anyone probing this.** `VerifyConnectivity` is not sufficient to test a credential. The
+driver defers the handshake, so a bad credential is only reported at first statement execution. The
+probe runs a real query per candidate.
+
+**Suggestion.** Documenting the expected credential shape, or rejecting an obviously wrong username,
+would save the next person an hour.
+
+## 14. A write whose result is never consumed reports no error
+
+This one is the Neo4j Go driver's behaviour rather than HydraDB's, but it interacts badly with
+finding 1 and it cost us a day, so it is recorded here for the next person.
+
+`session.Run` queues a statement and returns a lazy result. A write that the server rejects therefore
+looks like a success unless the result is consumed:
+
+```go
+res, err := sess.Run(ctx, stmt, params)  // err is nil even for a rejected write
+_, err = res.Consume(ctx)                // the rejection surfaces here
+```
+
+Our own probe made this mistake, which is why finding 1 went unnoticed while every write was failing,
+and why an early throughput number was measuring statements the server never accepted. Every write in
+this repository now goes through a helper that consumes.
+
+## 15. Two operational notes that cost time elsewhere
 
 Both are documented in the HydraDB README and both are easy to skip past.
 
@@ -229,7 +308,7 @@ Both are documented in the HydraDB README and both are easy to skip past.
 - The container runs as UID 10001, so a bind mounted data directory owned by the host user needs
   `--user "$(id -u):$(id -g)"` or the first storage operation fails.
 
-Startup is quick: `/readyz` returned 200 two seconds after container start, at 43 MB resident.
+Startup is quick: `/readyz` returned 200 one to two seconds after container start.
 
 ---
 
@@ -237,8 +316,11 @@ Startup is quick: `/readyz` returned 200 two seconds after container start, at 4
 
 | Finding | Design consequence |
 |---|---|
-| 2, 7, 8 | Ingest is a single writer at about 2,000 edges/sec. Batches of 128. Scale target set from this number rather than from an estimate |
+| 1 | The deployment runs MinIO, not a local directory. This is not a preference: the local store cannot hold a graph of the size this project needs |
+| 2, 7, 8 | Ingest is a single writer at about 3,500 edges/sec, batching 256 rows. The scale target is set from that number rather than from an estimate |
 | 3, 4 | `algo.MSpaths` value lists are interpolated into query text, with values validated against the npm name grammar first |
 | 5, 6 | Proof paths are affordable, and a single batched call serves many keyholders. No index declaration needed |
-| 9, 10 | Every whole graph pass is paged by integer id range. No full label scans, no unbounded aggregates. We keep our own counters |
-| 11 | One cell. Sharding is not pursued |
+| 9 | Node rows are deduplicated by vertex id before every write, and a property that can legitimately differ between two sources of the same node is written by its own statement |
+| 10, 11 | Every whole graph pass is paged by integer id range. No full label scans, no unbounded aggregates. We keep our own counters |
+| 12 | One cell. Sharding is not pursued |
+| 14 | Every write consumes its result. A benchmark that does not is measuring the client |
