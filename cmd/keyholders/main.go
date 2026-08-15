@@ -39,6 +39,8 @@ func main() {
 		err = runPackages(ctx, os.Args[2:])
 	case "ingest":
 		err = runIngest(ctx, os.Args[2:])
+	case "scan":
+		err = runScan(ctx, os.Args[2:])
 	case "resolve":
 		err = runResolve(ctx, os.Args[2:])
 	case "verify":
@@ -62,6 +64,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `keyholders builds and queries the npm keyholder graph.
 
 Commands:
+  scan       audit a lockfile: who can execute code in this project
   packages   write the ranked package list the ingest reads
   ingest     build the package, version and maintainer graph in HydraDB
   resolve    materialize RESOLVES_TO edges with their validity windows
@@ -163,11 +166,11 @@ func runIngest(ctx context.Context, args []string) error {
 		len(names), opts.Epochs, opts.Batch, *rate)
 
 	stats, err := ingest.New(reg, db, opts, os.Stderr).Run(ctx, names, cfg.StateDir)
-	report(stats)
+	reportIngest(stats)
 	return err
 }
 
-func report(s ingest.Stats) {
+func reportIngest(s ingest.Stats) {
 	el := s.Elapsed.Seconds()
 	if el <= 0 {
 		el = 1
