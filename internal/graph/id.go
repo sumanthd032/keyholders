@@ -29,6 +29,18 @@ func ID(urn string) int64 {
 	return int64(h & nonNegMask)
 }
 
+// EdgeID maps an edge to a stable non-negative HydraDB relationship id. Relationship ids carry the
+// same non-negative integer requirement as node ids, and batch edge writes are MERGE by id, so the
+// id is what makes a re-run idempotent rather than duplicating every edge.
+//
+// The discriminator exists because an edge type can legitimately connect the same pair more than
+// once: a maintainer who leaves a package and returns years later holds two disjoint intervals, and
+// collapsing them into one edge would claim they held a key throughout the gap. Callers with a
+// single edge per pair pass an empty discriminator.
+func EdgeID(srcURN, edgeType, dstURN, discriminator string) int64 {
+	return ID(srcURN + "|" + edgeType + "|" + dstURN + "|" + discriminator)
+}
+
 // URN builders. Every node type has exactly one canonical URN form; these are the only places
 // that form is constructed, so the id space cannot drift between ingest and query.
 
