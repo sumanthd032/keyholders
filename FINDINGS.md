@@ -10,7 +10,7 @@ reproducible with `go run ./cmd/probe`, which is kept in the tree for exactly th
 Nothing here is a complaint. HydraDB is at `0.1.0` and most of these limits are deliberate admission
 control doing its job. What follows is the shape of the envelope as we found it.
 
-**Storage backend.** Findings 1 to 12 were first taken against `CLOUD_PROVIDER=local`. Finding 1
+**Storage backend.** These were first taken against `CLOUD_PROVIDER=local`. Finding 1
 explains why that configuration cannot be used for anything durable, and every number here has since
 been re-measured against MinIO, which is what `deploy/docker-compose.yml` now runs.
 
@@ -243,7 +243,40 @@ Findings 10 and 11 together mean **there is no cheap way to ask how big the grap
 mildly awkward for progress reporting during a bulk load. The ingest maintains its own counters
 instead.
 
-## 12. Bolt cannot select a cell
+## 12. LIMIT does not reduce the cost of an unanchored pattern
+
+Findings 10 and 11 are usually described as limits on scans and aggregates. The practical form is
+stronger, and it is what shapes every read in this project: **a pattern that is not anchored at a
+known node id is materialized in full before `LIMIT` or `WHERE` is applied.**
+
+All three of these exceed the 30 second timeout on a graph of 105,000 nodes:
+
+```cypher
+MATCH (v:Version)-[r:DEPENDS_ON]->(b:Package) RETURN v.id AS vid LIMIT 3
+MATCH (v:Version)-[r:DEPENDS_ON]->(b:Package) WHERE v.id < 4611686018427387904 RETURN v.urn AS u LIMIT 3
+MATCH (p:Package)-[r:HAS_VERSION]->(v:Version) WHERE r.published_at > 1700000000 RETURN v.urn AS u LIMIT 3
+```
+
+Anchoring one end at an id returns immediately on the same graph:
+
+```cypher
+MATCH (p:Package {id: 5579749480056184795})-[:HAS_VERSION]->(v:Version) RETURN v.version AS ver
+MATCH (v:Version)-[e:DEPENDS_ON]->(p:Package {id: 5579749480056184795}) RETURN v.urn AS urn, e.range AS range
+```
+
+`WHERE` itself is fine once the pattern is anchored, including `AND`, `<=` and relationship
+properties. It just cannot be used to make an unanchored pattern affordable.
+
+The second query above is the one that matters most: **anchoring at the target and walking inbound is
+as fast as walking outbound**, which is the documented reason inbound topology records exist. It let
+the resolver organise its work by dependency target, reading each version timeline once instead of
+once per dependent.
+
+**Suggestion.** Pushing `LIMIT` into the match, or rejecting an unanchored pattern outright with a
+message saying so, would both be better than a 30 second wait. As it stands the query looks like it
+should work and simply never returns.
+
+## 13. Bolt cannot select a cell
 
 `SessionConfig.DatabaseName` selects the graph, not the cell:
 
@@ -258,7 +291,7 @@ Cell targeting is available over HTTP, where `cell_id` is a request body field, 
 Combined with finding 7, sharding a bulk load across cells would require several `graph-node`
 processes, and queries would then be unable to traverse across them, so we did not pursue it.
 
-## 13. Bolt authentication accepts any non-empty username
+## 14. Bolt authentication accepts any non-empty username
 
 Not documented. The auth token is validated as the **password**, and the username is ignored provided
 it is not empty.
@@ -282,7 +315,7 @@ probe runs a real query per candidate.
 **Suggestion.** Documenting the expected credential shape, or rejecting an obviously wrong username,
 would save the next person an hour.
 
-## 14. A write whose result is never consumed reports no error
+## 15. A write whose result is never consumed reports no error
 
 This one is the Neo4j Go driver's behaviour rather than HydraDB's, but it interacts badly with
 finding 1 and it cost us a day, so it is recorded here for the next person.
@@ -299,7 +332,7 @@ Our own probe made this mistake, which is why finding 1 went unnoticed while eve
 and why an early throughput number was measuring statements the server never accepted. Every write in
 this repository now goes through a helper that consumes.
 
-## 15. Two operational notes that cost time elsewhere
+## 16. Two operational notes that cost time elsewhere
 
 Both are documented in the HydraDB README and both are easy to skip past.
 
@@ -321,6 +354,6 @@ Startup is quick: `/readyz` returned 200 one to two seconds after container star
 | 3, 4 | `algo.MSpaths` value lists are interpolated into query text, with values validated against the npm name grammar first |
 | 5, 6 | Proof paths are affordable, and a single batched call serves many keyholders. No index declaration needed |
 | 9 | Node rows are deduplicated by vertex id before every write, and a property that can legitimately differ between two sources of the same node is written by its own statement |
-| 10, 11 | Every whole graph pass is paged by integer id range. No full label scans, no unbounded aggregates. We keep our own counters |
-| 12 | One cell. Sharding is not pursued |
-| 14 | Every write consumes its result. A benchmark that does not is measuring the client |
+| 10, 11, 12 | Every read is anchored at a known node id, and whole-graph work is driven from our own lists rather than from a scan. The resolver is organised by dependency target so that inbound traversal does the work. We keep our own counters |
+| 13 | One cell. Sharding is not pursued |
+| 15 | Every write consumes its result. A benchmark that does not is measuring the client |
