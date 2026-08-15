@@ -19,6 +19,7 @@ import (
 	"github.com/sumanthd032/keyholders/internal/graph"
 	"github.com/sumanthd032/keyholders/internal/ingest"
 	"github.com/sumanthd032/keyholders/internal/registry"
+	"github.com/sumanthd032/keyholders/internal/resolve"
 )
 
 func main() {
@@ -38,6 +39,8 @@ func main() {
 		err = runPackages(ctx, os.Args[2:])
 	case "ingest":
 		err = runIngest(ctx, os.Args[2:])
+	case "resolve":
+		err = runResolve(ctx, os.Args[2:])
 	case "verify":
 		err = runVerify(ctx, os.Args[2:])
 	case "-h", "--help", "help":
@@ -61,6 +64,7 @@ func usage() {
 Commands:
   packages   write the ranked package list the ingest reads
   ingest     build the package, version and maintainer graph in HydraDB
+  resolve    materialize RESOLVES_TO edges with their validity windows
   verify     cross-check the graph against deps.dev and rank maintainers by reach
 
 Run a command with -h for its flags.
@@ -199,4 +203,61 @@ func readNames(path string) ([]string, error) {
 		return nil, fmt.Errorf("read package list: %w", err)
 	}
 	return names, nil
+}
+
+func runResolve(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("resolve", flag.ExitOnError)
+	list := fs.String("packages", "packages.txt", "file of package names to resolve against")
+	limit := fs.Int("limit", 0, "resolve only the first N names, 0 for all")
+	batch := fs.Int("batch", graph.DefaultBatch, "UNWIND rows per statement")
+	readers := fs.Int("readers", 4, "concurrent target package reads")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	names, err := readNames(*list)
+	if err != nil {
+		return err
+	}
+	if *limit > 0 && *limit < len(names) {
+		names = names[:*limit]
+	}
+	if len(names) == 0 {
+		return fmt.Errorf("%s holds no package names", *list)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db, err := graph.Open(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer db.Close(ctx)
+
+	fmt.Fprintf(os.Stderr, "resolving declarations against %d packages, batch %d\n", len(names), *batch)
+	opts := resolve.Options{Readers: *readers, Batch: *batch}
+	stats, err := resolve.New(db, opts, os.Stderr).Run(ctx, names, cfg.StateDir)
+	reportResolve(stats)
+	return err
+}
+
+func reportResolve(s resolve.Stats) {
+	el := s.Elapsed.Seconds()
+	if el <= 0 {
+		el = 1
+	}
+	perEdge := 0.0
+	if s.Declarations > 0 {
+		perEdge = float64(s.Edges) / float64(s.Declarations)
+	}
+	fmt.Printf(`
+packages     %d resolved, %d already done
+declarations %d, of which %d never satisfiable, %d unparseable,
+             %d pointing outside the ingested set
+edges        %d RESOLVES_TO, %.2f windows per declaration
+elapsed      %s at %.0f edges/s
+`, s.Packages, s.Skipped, s.Declarations, s.Unsatisfied, s.Unparseable, s.NoTimeline,
+		s.Edges, perEdge, s.Elapsed.Round(time.Second), float64(s.Edges)/el)
 }
