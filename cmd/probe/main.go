@@ -34,14 +34,23 @@ const (
 	// ClientConfig.max_parameters, whose default is 1024 and which has no environment binding, so
 	// running the published image it cannot be raised. Exceeding it fails the whole statement with
 	// MemoryPoolOutOfMemoryError naming "client_query_batch_items", which reads like a memory
-	// problem but is a fixed row count. Ingest throughput therefore has to come from concurrent
-	// sessions rather than from larger batches.
+	// problem but is a fixed row count. The throughput probe below shows the ceiling is moot
+	// anyway: the rate peaks near 128 rows and concurrent sessions do not raise it, because writes
+	// serialise behind the per-cell writer lease.
 	maxBatch = 1024
 )
 
+// edgesPerRun is set from the -edges flag before any probe runs.
+var edgesPerRun = 60_000
+
 func main() {
 	only := flag.String("only", "", "run a single probe by name")
+	// The throughput workload is a flag because the useful size changes with the question. A few
+	// thousand edges answers "did the write path regress"; sixty thousand is needed before
+	// compaction starts and the sustained rate separates from the cold-cache rate.
+	edges := flag.Int("edges", 60_000, "edges per throughput run")
 	flag.Parse()
+	edgesPerRun = *edges
 
 	probes := []struct {
 		name string
@@ -133,6 +142,19 @@ func tryAuth(ctx context.Context, auth neo4j.AuthToken) error {
 	return nil
 }
 
+// write runs a statement and waits for the server to acknowledge it. sess.Run only queues the
+// statement: the driver streams lazily, so a write whose result is never consumed reports no error
+// even when the server rejected it. Every probe below writes through here, because measuring the
+// throughput of writes that silently failed is worse than not measuring at all.
+func write(ctx context.Context, sess neo4j.SessionWithContext, stmt string, params map[string]any) error {
+	res, err := sess.Run(ctx, stmt, params)
+	if err != nil {
+		return err
+	}
+	_, err = res.Consume(ctx)
+	return err
+}
+
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
@@ -173,7 +195,7 @@ func probeUnwind(ctx context.Context) error {
 	// Vertex upsert must be MERGE by id followed by SET. Folding urn into the MERGE pattern is
 	// rejected, because the pattern is the identity being matched on.
 	const upsert = `UNWIND $rows AS row MERGE (n {id: row.vertex}) SET n:Probe, n.urn = row.urn`
-	if _, err := sess.Run(ctx, upsert, map[string]any{"rows": rows}); err != nil {
+	if err := write(ctx, sess, upsert, map[string]any{"rows": rows}); err != nil {
 		return fmt.Errorf("vertex batch: %w", err)
 	}
 	fmt.Println("  OK      vertex batch (MERGE by id, then SET)")
@@ -189,7 +211,7 @@ func probeUnwind(ctx context.Context) error {
 	const link = `UNWIND $rows AS row
   MATCH (s:Probe {id: row.src}), (d:Probe {id: row.dst})
   CREATE (s)-[:DEPENDS_ON {id: row.rel}]->(d)`
-	if _, err := sess.Run(ctx, link, map[string]any{"rows": edges}); err != nil {
+	if err := write(ctx, sess, link, map[string]any{"rows": edges}); err != nil {
 		return fmt.Errorf("edge batch: %w", err)
 	}
 	fmt.Println("  OK      edge batch (UNWIND MATCH ... CREATE)")
@@ -240,27 +262,34 @@ func probeSelectors(ctx context.Context) error {
 			}
 		}
 		for chunk := range slicesOf(verts, maxBatch) {
-			if _, err := sess.Run(ctx,
+			if err := write(ctx, sess,
 				`UNWIND $rows AS row MERGE (n {id: row.vertex}) SET n:Sel, n.urn = row.urn`,
 				map[string]any{"rows": chunk}); err != nil {
 				return fmt.Errorf("plant vertices: %w", err)
 			}
 		}
 		for chunk := range slicesOf(edges, maxBatch) {
-			if _, err := sess.Run(ctx, chain, map[string]any{"rows": chunk}); err != nil {
+			if err := write(ctx, sess, chain, map[string]any{"rows": chunk}); err != nil {
 				return fmt.Errorf("plant edges: %w", err)
 			}
 		}
 		planted = size
 
 		// Look up a value near the end of the range, so a scan cannot get lucky early.
+		//
+		// The value list is interpolated into the query text rather than bound as a parameter.
+		// That is not a style choice: a list parameter is accepted only as UNWIND input, so
+		// `sourceValues: $vals` is rejected outright with "composite parameter $vals is only
+		// supported as an UNWIND input". Interpolation is the only way to call the multi-source
+		// form, which is why the ingest validates every value against the npm name grammar before
+		// it reaches a query string.
 		target := fmt.Sprintf("sel:%d", size-2)
-		const call = `CALL algo.SSpaths({sourceLabel: 'Sel', sourceProperty: 'urn',
-                        sourceValues: $vals, relTypes: ['LINKS'],
+		call := fmt.Sprintf(`CALL algo.MSpaths({sourceLabel: 'Sel', sourceProperty: 'urn',
+                        sourceValues: ['%s'], relTypes: ['LINKS'],
                         relDirection: 'outgoing', maxLen: 3, pathCount: 4})
-      YIELD path RETURN path`
+      YIELD path RETURN path`, target)
 		t0 := time.Now()
-		res, err := sess.Run(ctx, call, map[string]any{"vals": []any{target}})
+		res, err := sess.Run(ctx, call, nil)
 		if err != nil {
 			fmt.Printf("  n=%-6d selector call rejected: %v\n", size, truncate(err.Error(), 90))
 			continue
@@ -322,7 +351,6 @@ func probeThroughput(ctx context.Context) error {
 	}
 	defer drv.Close(ctx)
 
-	const edgesPerRun = 60_000
 	base := int64(10_000_000)
 
 	fmt.Printf("  %-8s %-8s %10s %12s %10s\n", "batch", "workers", "edges", "edges/sec", "ms/batch")
@@ -370,7 +398,7 @@ func plantVertices(ctx context.Context, drv neo4j.DriverWithContext, lo int64, n
 		rows = append(rows, map[string]any{"vertex": lo + int64(i)})
 	}
 	for chunk := range slicesOf(rows, maxBatch) {
-		if _, err := sess.Run(ctx,
+		if err := write(ctx, sess,
 			`UNWIND $rows AS row MERGE (n {id: row.vertex}) SET n:Tp`,
 			map[string]any{"rows": chunk}); err != nil {
 			return fmt.Errorf("vertex prep: %w", err)
@@ -396,7 +424,7 @@ func runChunks(ctx context.Context, drv neo4j.DriverWithContext, chunks [][]any,
 			sess := drv.NewSession(ctx, neo4j.SessionConfig{})
 			defer sess.Close(ctx)
 			for chunk := range work {
-				if _, err := sess.Run(ctx, link, map[string]any{"rows": chunk}); err != nil {
+				if err := write(ctx, sess, link, map[string]any{"rows": chunk}); err != nil {
 					select {
 					case errs <- err:
 					default:
