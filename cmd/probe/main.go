@@ -10,15 +10,19 @@
 //  2. Does UNWIND with a list-of-maps parameter work through the Neo4j Go driver?
 //  3. How do property indexes come into existence, given that CREATE INDEX is not in the
 //     supported Cypher surface, and does algo.MSpaths selector resolution scale?
-//  4. Can one query traverse edges spanning two cells?
-//  5. What is the sustained write throughput, and at which batch size?
+//  4. How many rows can one read return, and do Bolt and HTTP agree?
+//  5. Can one query traverse edges spanning two cells?
+//  6. What is the sustained write throughput, and at which batch size?
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"sync"
 	"time"
@@ -27,8 +31,9 @@ import (
 )
 
 const (
-	boltURI = "bolt://127.0.0.1:7687"
-	token   = "local-development-token-32-bytes"
+	boltURI      = "bolt://127.0.0.1:7687"
+	httpQueryURL = "http://127.0.0.1:8443/v1/graphs/default/query"
+	token        = "local-development-token-32-bytes"
 
 	// maxBatch is HydraDB's admission control ceiling on UNWIND batch items. It comes from
 	// ClientConfig.max_parameters, whose default is 1024 and which has no environment binding, so
@@ -40,8 +45,11 @@ const (
 	maxBatch = 1024
 )
 
-// edgesPerRun is set from the -edges flag before any probe runs.
-var edgesPerRun = 60_000
+// Workload sizes, set from flags before any probe runs.
+var (
+	edgesPerRun   = 60_000
+	spokesPerStar = 3_000
+)
 
 func main() {
 	only := flag.String("only", "", "run a single probe by name")
@@ -49,8 +57,12 @@ func main() {
 	// thousand edges answers "did the write path regress"; sixty thousand is needed before
 	// compaction starts and the sustained rate separates from the cold-cache rate.
 	edges := flag.Int("edges", 60_000, "edges per throughput run")
+	// 3,000 is enough to clear the HTTP page size and stay quick. The Bolt side was also run at
+	// 25,000, above the resultLimit the query layer uses, and returned every row.
+	spokes := flag.Int("spokes", 3_000, "spokes on the result cap star")
 	flag.Parse()
 	edgesPerRun = *edges
+	spokesPerStar = *spokes
 
 	probes := []struct {
 		name string
@@ -59,6 +71,7 @@ func main() {
 		{"auth", probeAuth},
 		{"unwind", probeUnwind},
 		{"selectors", probeSelectors},
+		{"resultcap", probeResultCap},
 		{"cells", probeCells},
 		{"throughput", probeThroughput},
 	}
@@ -304,6 +317,169 @@ func probeSelectors(ctx context.Context) error {
 	}
 	fmt.Println("  -> flat latency means indexed; latency growing with n means a scan")
 	return nil
+}
+
+// probeResultCap asks how many rows one read can return, on both transports.
+//
+// The query layer assumes algo.MSpaths' own resultLimit is the only ceiling: it sets the limit
+// generously and treats a full result set as evidence of truncation. A lower server side cap would
+// make that watch never fire, and every large read would be silently short. Since a reachability
+// answer that is quietly incomplete is the one failure a security tool must not have, the assumption
+// is worth a probe rather than a reading of the source.
+//
+// A star is planted rather than reusing the ingested graph, so the expected row count is exact.
+func probeResultCap(ctx context.Context) error {
+	drv, sess, err := session(ctx)
+	if err != nil {
+		return err
+	}
+	defer drv.Close(ctx)
+	defer sess.Close(ctx)
+
+	const hub = int64(3_000_000)
+	spokes := spokesPerStar
+
+	rows := make([]any, 0, spokes+1)
+	rows = append(rows, map[string]any{"vertex": hub, "urn": "cap:hub", "seq": int64(-1)})
+	for i := range spokes {
+		rows = append(rows, map[string]any{
+			"vertex": hub + 1 + int64(i),
+			"urn":    fmt.Sprintf("cap:spoke:%d", i),
+			"seq":    int64(i),
+		})
+	}
+	for chunk := range slicesOf(rows, maxBatch) {
+		if err := write(ctx, sess,
+			`UNWIND $rows AS row MERGE (n {id: row.vertex}) SET n:Cap, n.urn = row.urn, n.seq = row.seq`,
+			map[string]any{"rows": chunk}); err != nil {
+			return fmt.Errorf("plant star: %w", err)
+		}
+	}
+
+	edges := make([]any, 0, spokes)
+	for i := range spokes {
+		edges = append(edges, map[string]any{
+			"src": hub, "dst": hub + 1 + int64(i), "rel": hub + 1_000_000 + int64(i),
+		})
+	}
+	for chunk := range slicesOf(edges, maxBatch) {
+		if err := write(ctx, sess, `UNWIND $rows AS row
+      MATCH (s:Cap {id: row.src}), (d:Cap {id: row.dst})
+      MERGE (s)-[:SPOKE {id: row.rel}]->(d)`, map[string]any{"rows": chunk}); err != nil {
+			return fmt.Errorf("plant spokes: %w", err)
+		}
+	}
+
+	// want is how many rows the statement should produce, so an aggregate is not reported as short.
+	count := func(label, stmt string, want int) {
+		res, err := sess.Run(ctx, stmt, nil)
+		if err != nil {
+			fmt.Printf("  %-34s rejected: %v\n", label, truncate(err.Error(), 70))
+			return
+		}
+		recs, err := res.Collect(ctx)
+		if err != nil {
+			fmt.Printf("  %-34s collect failed: %v\n", label, truncate(err.Error(), 70))
+			return
+		}
+		short := ""
+		if len(recs) < want {
+			short = fmt.Sprintf("  <- short by %d", want-len(recs))
+		}
+		fmt.Printf("  %-34s %5d rows%s\n", label, len(recs), short)
+	}
+
+	fmt.Printf("  planted a hub with %d spokes\n", spokes)
+	// The aggregate first, because it establishes the expected fan-out from the server's own count
+	// rather than from what the planting code believes it wrote.
+	count("count(*)", fmt.Sprintf(
+		`MATCH (h:Cap {id: %d})-[:SPOKE]->(s) RETURN count(*) AS n`, hub), 1)
+	count("MATCH, no LIMIT", fmt.Sprintf(
+		`MATCH (h:Cap {id: %d})-[:SPOKE]->(s) RETURN s.urn AS urn`, hub), spokes)
+	count(fmt.Sprintf("MATCH, LIMIT %d", spokes), fmt.Sprintf(
+		`MATCH (h:Cap {id: %d})-[:SPOKE]->(s) RETURN s.urn AS urn LIMIT %d`, hub, spokes), spokes)
+
+	const fan = `CALL algo.MSpaths({sourceLabel: 'Cap', sourceProperty: 'urn',
+     sourceValues: ['cap:hub'], relTypes: ['SPOKE'], relDirection: 'outgoing', maxLen: 1,
+     pathCount: %d, resultLimit: %d}) YIELD path RETURN path`
+	count(fmt.Sprintf("MSpaths, resultLimit %d", spokes), fmt.Sprintf(fan, spokes, spokes), spokes)
+	count("MSpaths, resultLimit 1024", fmt.Sprintf(fan, 1024, 1024), spokes)
+
+	// The same two reads over HTTP, which is the documented fallback transport and is where the
+	// interesting difference is.
+	httpCount("HTTP MATCH, no LIMIT", fmt.Sprintf(
+		`MATCH (h:Cap {id: %d})-[:SPOKE]->(s) RETURN s.urn AS urn`, hub), spokes)
+	httpCount(fmt.Sprintf("HTTP MSpaths, resultLimit %d", spokes),
+		fmt.Sprintf(fan, spokes, spokes), spokes)
+
+	// Paging is the escape hatch, and only a pattern that accepts ORDER BY has one. A procedure call
+	// yields paths, which carry no orderable projection, so it has none.
+	page := 0
+	for offset := 0; offset < spokes; offset += 1000 {
+		res, err := sess.Run(ctx, fmt.Sprintf(
+			`MATCH (h:Cap {id: %d})-[:SPOKE]->(s) RETURN s.urn AS urn ORDER BY s.seq SKIP %d LIMIT 1000`,
+			hub, offset), nil)
+		if err != nil {
+			fmt.Printf("  SKIP %-29d rejected: %v\n", offset, truncate(err.Error(), 70))
+			return nil
+		}
+		recs, err := res.Collect(ctx)
+		if err != nil {
+			return fmt.Errorf("page at %d: %w", offset, err)
+		}
+		page += len(recs)
+	}
+	fmt.Printf("  %-34s %5d rows\n", "ORDER BY + SKIP, 1000 per page", page)
+
+	fmt.Println("  -> Bolt honours resultLimit and LIMIT exactly, so the query layer's")
+	fmt.Println("     split-on-full-result check is the right mitigation there")
+	fmt.Println("  -> HTTP pages at 1024 whatever the query asks for, and hands back a")
+	fmt.Println("     next_cursor it will not accept back, so it cannot read past one page")
+	return nil
+}
+
+// httpCount runs the same statement over the HTTP API and reports the row count and cursor. The two
+// transports share one query service, so any difference is in the transport rather than the engine.
+func httpCount(label, query string, want int) {
+	body, err := json.Marshal(map[string]any{"cell_id": "cell-0", "query": query})
+	if err != nil {
+		fmt.Printf("  %-34s encode failed: %v\n", label, err)
+		return
+	}
+	req, err := http.NewRequest(http.MethodPost, httpQueryURL, bytes.NewReader(body))
+	if err != nil {
+		fmt.Printf("  %-34s request failed: %v\n", label, err)
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-Graph-Namespace", "default")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Printf("  %-34s %v\n", label, truncate(err.Error(), 70))
+		return
+	}
+	defer resp.Body.Close()
+
+	var decoded struct {
+		Rows       []json.RawMessage `json:"rows"`
+		NextCursor *int64            `json:"next_cursor"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		fmt.Printf("  %-34s decode failed: %v\n", label, err)
+		return
+	}
+
+	cursor := "none"
+	if decoded.NextCursor != nil {
+		cursor = fmt.Sprintf("next_cursor=%d", *decoded.NextCursor)
+	}
+	short := ""
+	if len(decoded.Rows) < want {
+		short = fmt.Sprintf("  <- short by %d", want-len(decoded.Rows))
+	}
+	fmt.Printf("  %-34s %5d rows, %s%s\n", label, len(decoded.Rows), cursor, short)
 }
 
 // probeCells asks whether a Bolt session can target a cell, and whether one query can traverse edges

@@ -391,6 +391,47 @@ One restriction worth knowing: `fairRelationshipVariants` is rejected outside `p
 to targets by position rather than searching every source for every target, so the two cannot be
 combined for a many-sources-one-target proof path query.
 
+## 19. The HTTP API stops at 1,024 rows and hands back a cursor it will not accept back
+
+The two transports do not return the same answer to the same query. `go run ./cmd/probe -only
+resultcap` plants a hub with 3,000 spokes and reads it back both ways:
+
+| Read | Bolt | HTTP |
+|---|---|---|
+| `MATCH (h)-[:SPOKE]->(s) RETURN s.urn` | 3,000 | 1,024, `next_cursor: 22` |
+| `MATCH … LIMIT 3000` | 3,000 | 1,024, `next_cursor` set |
+| `algo.MSpaths(… resultLimit: 3000)` | 3,000 | 1,024, `next_cursor` set |
+| `algo.MSpaths(… resultLimit: 1024)` | 1,024 | 1,024 |
+| `ORDER BY … SKIP n LIMIT 1000`, paged | 3,000 | n/a |
+
+Bolt honours `LIMIT` and `resultLimit` exactly. Re-run at 25,000 spokes it still returns every row,
+which is above the 20,000 `resultLimit` the query layer uses, so nothing lower than the procedure's
+own limit is in the way. HTTP stops at 1,024 whatever the query asked for.
+
+Unlike finding 17 the HTTP truncation is at least signalled, since `next_cursor` is non-null. It is
+not, however, usable. Sending the cursor back with the query is rejected:
+
+```
+{"code":"invalid_request",
+ "message":"ClientProtocol query is not supported yet: result cursor does not belong to this query
+ request"}
+```
+
+Omitting `query` and sending only the cursor fails deserialisation (`missing field query`), and there
+is no cursor endpoint (`/v1/graphs/default/query/cursor/{id}` is a 404). So on this build the HTTP
+API cannot read past its first page by any route we could find.
+
+The practical consequence is that HTTP is not a drop-in fallback for Bolt on read paths, only on
+writes and on reads known to be small. That is worth stating plainly, because a fallback that returns
+a well-formed short answer is worse than one that fails: 1,024 rows of a 3,000 row traversal is a
+plausible-looking undercount.
+
+`SKIP` with `ORDER BY` does work, on both transports, so an ordered `MATCH` can be paged past any
+cap. A procedure call cannot, because `YIELD path` has no orderable projection to page on.
+
+**Suggestion.** Accept the returned `next_cursor` on a subsequent request, or document the page size
+so callers know to page with `SKIP` instead.
+
 ---
 
 ## What we changed in our design because of these
@@ -407,3 +448,4 @@ combined for a many-sources-one-target proof path query.
 | 15 | Every write consumes its result. A benchmark that does not is measuring the client |
 | 17 | A result set that exactly fills `resultLimit` is treated as truncated and the source list is split. Silent undercounting is the one failure a reachability query must not have |
 | 18 | Interval intersection happens in the client, over the edge properties the path already carries. `MSpaths` with `maxLen: 1` is the batched frontier expander the interval search runs on |
+| 19 | Every read goes over Bolt. HTTP is kept for writes and for reads bounded well under 1,024 rows, and is no longer described as a general fallback |
