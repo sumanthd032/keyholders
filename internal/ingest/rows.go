@@ -66,6 +66,17 @@ const (
   MATCH (s:Maintainer {id: row.src}), (d:Package {id: row.dst})
   MERGE (s)-[r:MAINTAINS {id: row.id}]->(d)
   SET r.valid_from = row.valid_from, r.valid_to = row.valid_to, r.observed = row.observed`
+
+	// SAMPLED duplicates a subset of HAS_VERSION, pointing only at the versions whose registry
+	// document was fetched. That is redundant as data and necessary as physical design: traversal
+	// indexes are built per edge type, so this is the only way to select the sampled versions in a
+	// batched call. The alternative, filtering HAS_VERSION on a version property, walks every
+	// version of every package and measured 1.7 seconds for one package with 3,795 of them, against
+	// 6 ms for a package with a handful.
+	linkSampled = `UNWIND $rows AS row
+  MATCH (s:Package {id: row.src}), (d:Version {id: row.dst})
+  MERGE (s)-[r:SAMPLED {id: row.id}]->(d)
+  SET r.published_at = row.published_at`
 )
 
 // rows is one flush unit: everything derived from one package, grouped by the statement that writes
@@ -78,6 +89,7 @@ type rows struct {
 	annotations []map[string]any
 	maintainers []map[string]any
 	hasVersion  []map[string]any
+	sampled     []map[string]any
 	dependsOn   []map[string]any
 	maintains   []map[string]any
 }
@@ -89,6 +101,7 @@ func (r *rows) append(other *rows) {
 	r.annotations = append(r.annotations, other.annotations...)
 	r.maintainers = append(r.maintainers, other.maintainers...)
 	r.hasVersion = append(r.hasVersion, other.hasVersion...)
+	r.sampled = append(r.sampled, other.sampled...)
 	r.dependsOn = append(r.dependsOn, other.dependsOn...)
 	r.maintains = append(r.maintains, other.maintains...)
 }
@@ -98,7 +111,7 @@ func (r *rows) nodeCount() int {
 }
 
 func (r *rows) edgeCount() int {
-	return len(r.hasVersion) + len(r.dependsOn) + len(r.maintains)
+	return len(r.hasVersion) + len(r.sampled) + len(r.dependsOn) + len(r.maintains)
 }
 
 func (r *rows) reset() {
@@ -152,13 +165,20 @@ func (r *rows) addVersion(name string, rel registry.Release) {
 	})
 }
 
-func (r *rows) addVersionDoc(doc registry.VersionDoc) {
+func (r *rows) addVersionDoc(doc registry.VersionDoc, publishedAt int64) {
+	pkgURN := graph.PackageURN(ecosystem, doc.Name)
 	verURN := graph.VersionURN(ecosystem, doc.Name, doc.Version)
 	r.annotations = append(r.annotations, map[string]any{
 		"vertex":             graph.ID(verURN),
 		"published_by":       doc.PublishedBy,
 		"has_provenance":     doc.HasProvenance,
 		"has_install_script": doc.HasInstallScript,
+	})
+	r.sampled = append(r.sampled, map[string]any{
+		"id":           graph.EdgeID(pkgURN, "SAMPLED", verURN, ""),
+		"src":          graph.ID(pkgURN),
+		"dst":          graph.ID(verURN),
+		"published_at": publishedAt,
 	})
 }
 

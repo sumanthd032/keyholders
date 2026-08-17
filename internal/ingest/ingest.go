@@ -229,6 +229,7 @@ func (i *Ingester) write(ctx context.Context, r *rows) error {
 	r.annotations = dedupe(r.annotations, "vertex")
 	r.maintainers = dedupe(r.maintainers, "vertex")
 	r.hasVersion = dedupe(r.hasVersion, "id")
+	r.sampled = dedupe(r.sampled, "id")
 	r.dependsOn = dedupe(r.dependsOn, "id")
 	r.maintains = dedupe(r.maintains, "id")
 
@@ -243,6 +244,7 @@ func (i *Ingester) write(ctx context.Context, r *rows) error {
 		{"maintainers", upsertMaintainer, r.maintainers},
 		{"version annotations", annotateVersion, r.annotations},
 		{"has_version", linkHasVersion, r.hasVersion},
+		{"sampled", linkSampled, r.sampled},
 		{"depends_on", linkDependsOn, r.dependsOn},
 		{"maintains", linkMaintains, r.maintains},
 	}
@@ -306,7 +308,7 @@ func (i *Ingester) fetchPackage(ctx context.Context, name string, rank int, epoc
 			}
 			return nil, fmt.Errorf("version document %s@%s: %w", name, rel.Version, err)
 		}
-		pr.rows.addVersionDoc(doc)
+		pr.rows.addVersionDoc(doc, graph.Timestamp(rel.PublishedAt))
 		obs = append(obs, observation{at: graph.Timestamp(rel.PublishedAt), maintainers: doc.Maintainers})
 		for _, h := range doc.Maintainers {
 			handles[h] = true
