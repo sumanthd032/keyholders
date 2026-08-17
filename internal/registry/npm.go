@@ -25,8 +25,15 @@ type VersionDoc struct {
 	Version     string
 	Maintainers []string
 
-	// PublishedBy is _npmUser, the account that actually ran the publish. It is a strictly stronger
-	// signal than membership of the maintainer set, because it is an action rather than a capability.
+	// PublishedBy is the human account behind the publish. It is a strictly stronger signal than
+	// membership of the maintainer set, because it is an action rather than a capability.
+	//
+	// It is not simply `_npmUser.name`. That field carries the publishing *identity*, which for a
+	// release made through a trusted publisher is the CI system: cookie@2.0.1 reports "GitHub
+	// Actions", with the person who authorised it in `_npmUser.approver`. Taking the name at face
+	// value credits nobody for those publishes, which would make an account that moved to trusted
+	// publishing look dormant, and dormancy raises its risk score. The safest publishing practice
+	// available would then be scored as a liability, so the approver wins where there is one.
 	PublishedBy string
 
 	HasProvenance    bool
@@ -51,7 +58,10 @@ func parseVersionDoc(name, version string, body []byte) (VersionDoc, error) {
 			Name string `json:"name"`
 		} `json:"maintainers"`
 		NpmUser struct {
-			Name string `json:"name"`
+			Name     string `json:"name"`
+			Approver *struct {
+				Name string `json:"name"`
+			} `json:"approver"`
 		} `json:"_npmUser"`
 		Scripts map[string]string `json:"scripts"`
 		Dist    struct {
@@ -66,10 +76,15 @@ func parseVersionDoc(name, version string, body []byte) (VersionDoc, error) {
 		return VersionDoc{}, fmt.Errorf("parse npm document for %s@%s: %w", name, version, err)
 	}
 
+	publishedBy := doc.NpmUser.Name
+	if doc.NpmUser.Approver != nil && doc.NpmUser.Approver.Name != "" {
+		publishedBy = doc.NpmUser.Approver.Name
+	}
+
 	v := VersionDoc{
 		Name:        doc.Name,
 		Version:     doc.Version,
-		PublishedBy: doc.NpmUser.Name,
+		PublishedBy: publishedBy,
 		// dist.attestations is present only when the version was published with a provenance
 		// attestation, so its presence is the signal. Verified against sigstore and vite, which
 		// carry it, and tinybench, which does not.

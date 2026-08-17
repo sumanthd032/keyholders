@@ -124,6 +124,24 @@ func TestParseVersionDoc(t *testing.T) {
 			wantPublishedBy:  "m",
 			wantInstallHooks: true,
 		},
+		{
+			// Trimmed from the real cookie@2.0.1 document. _npmUser.name is the publishing identity,
+			// which here is the CI system, and the person is in approver. Attributing the publish to
+			// "GitHub Actions" would credit nobody for it, and an account credited with no publishes
+			// reads as dormant, which raises its risk score. Trusted publishing would then be scored
+			// as a liability.
+			name: "trusted publisher credits the approver",
+			body: `{"name":"cookie","version":"2.0.1",
+              "maintainers":[{"name":"blakeembrey"},{"name":"dougwilson"}],
+              "_npmUser":{"name":"GitHub Actions","email":"npm-oidc-no-reply@github.com",
+                "approver":{"name":"blakeembrey","email":"hello@blakeembrey.com"},
+                "trustedPublisher":{"id":"github","oidcConfigId":"oidc:2e6871c3"}},
+              "scripts":{"build":"tsc"},
+              "dist":{"attestations":{"url":"https://example","provenance":{"predicateType":"https://slsa.dev/provenance/v1"}}}}`,
+			wantMaintainers: []string{"blakeembrey", "dougwilson"},
+			wantPublishedBy: "blakeembrey",
+			wantProvenance:  true,
+		},
 	}
 
 	for _, tc := range cases {
