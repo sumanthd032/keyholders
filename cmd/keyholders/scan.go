@@ -141,21 +141,95 @@ func reportScan(a query.Audit, elapsed time.Duration, reads, top int, at string)
 		return
 	}
 
-	fmt.Printf("\n  keyholders by reach into this tree\n\n")
+	reportRoster(a, top)
+	reportIrreplaceable(a)
+	reportWeights(a.Weights)
+}
+
+func reportRoster(a query.Audit, top int) {
+	fmt.Printf("\n  keyholders by risk\n\n")
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "  account\tpackages\tsince\t")
+	fmt.Fprintln(w, "  account\trisk\tpackages\tsolo\tno prov\tinstall\tlast publish\tsince\t")
+
 	for i, k := range a.Keyholders {
 		if i >= top {
-			fmt.Fprintf(w, "  ... and %d more\t\t\t\n", len(a.Keyholders)-top)
+			fmt.Fprintf(w, "  ... and %d more\t\t\t\t\t\t\t\t\n", len(a.Keyholders)-top)
 			break
 		}
-		since := "unknown"
-		if s := k.Since(); s > 0 {
-			since = time.Unix(s, 0).UTC().Format("2006-01-02")
-		}
-		fmt.Fprintf(w, "  %s\t%d\t%s\t\n", k.Handle, k.Packages(), since)
+		s := a.Signals[k.Handle]
+		fmt.Fprintf(w, "  %s\t%.2f\t%d\t%s\t%s\t%s\t%s\t%s\t\n",
+			k.Handle, a.Scores[k.Handle].Total, k.Packages(),
+			fraction(s.Solo), fraction(s.NoProvenance), fraction(s.InstallScript),
+			day(s.LastPublish), day(k.Since))
 	}
 	w.Flush()
+}
+
+// fraction prints a proportion as its raw counts, never as a bare percentage. Three of five and
+// three hundred of five hundred are both sixty percent and are not equally worth acting on, and a
+// term with nothing behind it has to be visibly empty rather than look like zero.
+func fraction(f query.Fraction) string {
+	if !f.Known() {
+		return "-"
+	}
+	return fmt.Sprintf("%d/%d", f.Count, f.Of)
+}
+
+func day(t int64) string {
+	if t <= 0 {
+		return "-"
+	}
+	return time.Unix(t, 0).UTC().Format("2006-01-02")
+}
+
+// reportIrreplaceable lists the accounts you cannot route around. Every account is the only route to
+// its own packages, so the list is the ones that also take something downstream with them.
+func reportIrreplaceable(a query.Audit) {
+	var chokepoints []query.Cut
+	for _, c := range a.Cuts {
+		if c.Irreplaceable() {
+			chokepoints = append(chokepoints, c)
+		}
+	}
+	if len(chokepoints) == 0 {
+		fmt.Printf("\n  no account is the only route to a package it does not already control\n")
+		return
+	}
+
+	fmt.Printf("\n  irreplaceable: removing these costs reach you cannot get back another way\n\n")
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "  account\tcontrols\tpackages lost\tof which downstream\t")
+	for i, c := range chokepoints {
+		if i >= 10 {
+			fmt.Fprintf(w, "  ... and %d more\t\t\t\t\n", len(chokepoints)-10)
+			break
+		}
+		fmt.Fprintf(w, "  %s\t%d\t%d\t%s\t\n", c.Handle, c.Controls, c.Packages,
+			strings.TrimPrefix(strings.Join(names(c.Orphaned, 3), ", "), "pkg:npm/"))
+	}
+	w.Flush()
+}
+
+// names shortens a URN list for printing, keeping the count honest when it is cut.
+func names(urns []string, keep int) []string {
+	out := make([]string, 0, keep+1)
+	for i, u := range urns {
+		if i == keep {
+			out = append(out, fmt.Sprintf("and %d more", len(urns)-keep))
+			break
+		}
+		out = append(out, strings.TrimPrefix(u, "pkg:npm/"))
+	}
+	return out
+}
+
+// reportWeights prints the formula that produced the ranking. A security tool whose ranking cannot
+// be audited is a security tool nobody should use, so this is not optional output.
+func reportWeights(w query.Weights) {
+	fmt.Printf("\n  risk = %.2f reach + %.2f staleness + %.2f solo + %.2f no-provenance + %.2f install-script\n",
+		w.Reach, w.Staleness, w.Solo, w.NoProvenance, w.InstallScript)
+	fmt.Printf("  terms with nothing measured are dropped and their weight shared out, so a score\n")
+	fmt.Printf("  built from fewer terms is not the same as a low score\n")
 }
 
 // reach counts what each semantics reached. Both sides are counted the same way at both
@@ -253,42 +327,106 @@ func openOrDate(t int64) string {
 	return time.Unix(t, 0).UTC().Format("2006-01-02")
 }
 
+// emitJSON writes the whole audit, including the decomposed score and the removal analysis.
+//
+// The terms are emitted individually rather than as the total alone, and every fraction keeps its
+// denominator, so a consumer can re-derive the ranking or re-weight it. A score handed over as one
+// number is not auditable by whoever receives it, which defeats the reason it is a formula.
 func emitJSON(a query.Audit, elapsed time.Duration) error {
 	r := counts(a)
+	type fractionJSON struct {
+		Count int  `json:"count"`
+		Of    int  `json:"of"`
+		Known bool `json:"known"`
+	}
+	type termJSON struct {
+		Name         string  `json:"name"`
+		Value        float64 `json:"value"`
+		Weight       float64 `json:"weight"`
+		Known        bool    `json:"known"`
+		Contribution float64 `json:"contribution"`
+		Detail       string  `json:"detail"`
+	}
 	type keyholder struct {
-		Handle   string `json:"handle"`
-		Packages int    `json:"packages"`
-		Since    int64  `json:"since,omitempty"`
+		Handle        string       `json:"handle"`
+		Packages      int          `json:"packages"`
+		Holds         []string     `json:"holds"`
+		Since         int64        `json:"since,omitempty"`
+		Risk          float64      `json:"risk"`
+		Terms         []termJSON   `json:"risk_terms"`
+		Solo          fractionJSON `json:"solo"`
+		NoProvenance  fractionJSON `json:"no_provenance"`
+		InstallScript fractionJSON `json:"install_script"`
+		LastPublish   int64        `json:"last_publish,omitempty"`
+		LastRelease   int64        `json:"last_release,omitempty"`
+	}
+	type cutJSON struct {
+		Handle        string   `json:"handle"`
+		Controls      int      `json:"controls"`
+		PackagesLost  int      `json:"packages_lost"`
+		VersionsLost  int      `json:"versions_lost"`
+		Downstream    int      `json:"downstream_lost"`
+		Orphaned      []string `json:"orphaned"`
+		Irreplaceable bool     `json:"irreplaceable"`
 	}
 	out := struct {
-		Project              string      `json:"project"`
-		Format               string      `json:"format"`
-		Pins                 int         `json:"pins"`
-		Sources              int         `json:"sources_in_graph"`
-		Keyholders           []keyholder `json:"keyholders"`
-		KeyholderCount       int         `json:"keyholder_count"`
-		UnionKeyholders      int         `json:"union_keyholder_count"`
-		PhantomKeyholders    int         `json:"phantom_keyholder_count"`
-		PackagesReached      int         `json:"packages_reached"`
-		UnionPackagesReached int         `json:"union_packages_reached"`
-		VersionsReached      int         `json:"versions_reached"`
-		UnionVersionsReached int         `json:"union_versions_reached"`
-		Depth                int         `json:"depth"`
-		Truncated            bool        `json:"truncated"`
-		Kappa                float64     `json:"kappa"`
-		ElapsedMS            int64       `json:"elapsed_ms"`
+		Project              string         `json:"project"`
+		Format               string         `json:"format"`
+		Pins                 int            `json:"pins"`
+		Sources              int            `json:"sources_in_graph"`
+		Keyholders           []keyholder    `json:"keyholders"`
+		KeyholderCount       int            `json:"keyholder_count"`
+		UnionKeyholders      int            `json:"union_keyholder_count"`
+		PhantomKeyholders    int            `json:"phantom_keyholder_count"`
+		PackagesReached      int            `json:"packages_reached"`
+		UnionPackagesReached int            `json:"union_packages_reached"`
+		VersionsReached      int            `json:"versions_reached"`
+		UnionVersionsReached int            `json:"union_versions_reached"`
+		Cuts                 []cutJSON      `json:"cuts"`
+		Weights              query.Weights  `json:"weights"`
+		Depth                int            `json:"depth"`
+		Truncated            bool           `json:"truncated"`
+		Kappa                float64        `json:"kappa"`
+		ElapsedMS            int64          `json:"elapsed_ms"`
 	}{
 		Project: a.Project, Format: a.Format, Pins: a.Pins, Sources: a.Sources,
 		KeyholderCount: len(a.Keyholders), UnionKeyholders: a.UnionKeyholders,
 		PhantomKeyholders: a.PhantomKeyholders(),
 		PackagesReached:   r.coPackages, UnionPackagesReached: r.unionPackages,
 		VersionsReached: r.coVersions, UnionVersionsReached: r.unionVersions,
-		Depth: a.Reach.Depth, Truncated: a.Reach.Truncated,
+		Weights: a.Weights,
+		Depth:   a.Reach.Depth, Truncated: a.Reach.Truncated,
 		Kappa: a.Reach.Kappa, ElapsedMS: elapsed.Milliseconds(),
 	}
+
+	frac := func(f query.Fraction) fractionJSON {
+		return fractionJSON{Count: f.Count, Of: f.Of, Known: f.Known()}
+	}
 	for _, k := range a.Keyholders {
-		out.Keyholders = append(out.Keyholders, keyholder{
-			Handle: k.Handle, Packages: k.Packages(), Since: k.Since(),
+		s, score := a.Signals[k.Handle], a.Scores[k.Handle]
+		e := keyholder{
+			Handle: k.Handle, Packages: k.Packages(), Since: k.Since, Risk: score.Total,
+			Solo: frac(s.Solo), NoProvenance: frac(s.NoProvenance),
+			InstallScript: frac(s.InstallScript),
+			LastPublish:   s.LastPublish, LastRelease: s.LastRelease,
+		}
+		for pkg := range k.Through {
+			e.Holds = append(e.Holds, pkg)
+		}
+		sort.Strings(e.Holds)
+		for _, t := range score.Terms {
+			e.Terms = append(e.Terms, termJSON{
+				Name: t.Name, Value: t.Value, Weight: t.Weight, Known: t.Known,
+				Contribution: t.Contribution(), Detail: t.Detail,
+			})
+		}
+		out.Keyholders = append(out.Keyholders, e)
+	}
+	for _, c := range a.Cuts {
+		out.Cuts = append(out.Cuts, cutJSON{
+			Handle: c.Handle, Controls: c.Controls, PackagesLost: c.Packages,
+			VersionsLost: c.Versions, Downstream: c.Beyond, Orphaned: c.Orphaned,
+			Irreplaceable: c.Irreplaceable(),
 		})
 	}
 

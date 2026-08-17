@@ -16,12 +16,29 @@ type GraphExpander struct {
 	db       *graph.Client
 	edgeType string
 
+	// Direction is the sense the edge type is walked in, "outgoing" by default. An audit walks
+	// RESOLVES_TO outward from a project into its dependencies; asking what one account reaches
+	// walks the same edges inward from their packages to their dependents.
+	Direction string
+
 	// Reads counts the round trips made, so a run can report how much of its time was the graph.
 	Reads int
+
+	// Attrs holds the node properties seen during expansion, keyed by version URN.
+	//
+	// A returned path carries every property of both its nodes, and the search needs only the URNs,
+	// so the rest would otherwise be decoded and dropped. Keeping them turns the publisher signals
+	// into a by-product of the traversal rather than a second pass over the same nodes.
+	Attrs map[string]VersionAttrs
 }
 
 func NewGraphExpander(db *graph.Client, edgeType string) *GraphExpander {
-	return &GraphExpander{db: db, edgeType: edgeType}
+	return &GraphExpander{
+		db:        db,
+		edgeType:  edgeType,
+		Direction: "outgoing",
+		Attrs:     map[string]VersionAttrs{},
+	}
 }
 
 // sourceChunk is how many URNs go into one MSpaths call.
@@ -70,9 +87,9 @@ func (g *GraphExpander) expand(ctx context.Context, urns []string) ([]Edge, erro
 	}
 
 	stmt := fmt.Sprintf(`CALL algo.MSpaths({sourceLabel: 'Version', sourceProperty: 'urn',
-      sourceValues: [%s], relTypes: ['%s'], relDirection: 'outgoing',
+      sourceValues: [%s], relTypes: ['%s'], relDirection: '%s',
       maxLen: 1, pathCount: %d, resultLimit: %d}) YIELD path RETURN path`,
-		quoteAll(valid), g.edgeType, resultLimit, resultLimit)
+		quoteAll(valid), g.edgeType, g.Direction, resultLimit, resultLimit)
 
 	g.Reads++
 	recs, err := g.db.Query(ctx, stmt, nil)
@@ -109,6 +126,11 @@ func (g *GraphExpander) expand(ctx context.Context, urns []string) ([]Edge, erro
 		if len(path.Nodes) != 2 || len(path.Relationships) != 1 {
 			// maxLen is 1, so anything else is not a single hop and we do not know how to read it.
 			continue
+		}
+		for _, n := range path.Nodes {
+			if urn := stringProp(n.Props, "urn"); urn != "" {
+				g.Attrs[urn] = versionAttrs(n.Props)
+			}
 		}
 		edges = append(edges, Edge{
 			From:  stringProp(path.Nodes[0].Props, "urn"),

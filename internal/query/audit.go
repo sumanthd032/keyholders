@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 
@@ -22,21 +23,16 @@ type Keyholder struct {
 	// coexistence path from the project reached that package. The intersection of the two is the
 	// point: someone who left a project before you ever depended on it never held your key.
 	Through map[string]Set
+
+	// Since is when this account's publish rights over any of those packages begin, read off the
+	// MAINTAINS edge rather than off Through. Through is already clipped to the query window, so at
+	// a single instant every span in it starts at that instant, and reading tenure from it would
+	// report the date of the question instead of the date of the access.
+	Since int64
 }
 
 // Packages is the number of packages in your tree this account can publish to.
 func (k Keyholder) Packages() int { return len(k.Through) }
-
-// Since is the earliest instant this account held a key to anything in the tree.
-func (k Keyholder) Since() int64 {
-	var earliest int64
-	for _, set := range k.Through {
-		if e := set.Earliest(); e != 0 && (earliest == 0 || e < earliest) {
-			earliest = e
-		}
-	}
-	return earliest
-}
 
 // Audit is the answer for one lockfile.
 type Audit struct {
@@ -51,10 +47,18 @@ type Audit struct {
 
 	Reach Result
 
-	// Keyholders counts only coexistence paths. UnionKeyholders is what a tool without interval
-	// semantics would report, and the difference between them is the overcount nobody has measured.
+	// Keyholders counts only coexistence paths, ordered by risk. UnionKeyholders is what a tool
+	// without interval semantics would report, and the difference between them is the overcount
+	// nobody has measured.
 	Keyholders      []Keyholder
 	UnionKeyholders int
+
+	// Signals, Scores and Cuts are keyed by handle. Weights are carried alongside the scores they
+	// produced, because a ranking whose weights are not on the page is a ranking nobody can check.
+	Signals map[string]Signals
+	Scores  map[string]Score
+	Weights Weights
+	Cuts    []Cut
 }
 
 // PhantomKeyholders is the number of accounts the union graph would name as keyholders but which no
@@ -65,10 +69,22 @@ func (a Audit) PhantomKeyholders() int { return a.UnionKeyholders - len(a.Keyhol
 type Auditor struct {
 	db  *graph.Client
 	exp *GraphExpander
+
+	// Weights configure the risk ranking. Exported so a caller can override them and print what it
+	// used, which is the whole point of the score being a formula rather than a model.
+	Weights Weights
+
+	// Now is the instant a point-in-time audit is scored against when the query itself names none.
+	Now int64
 }
 
 func NewAuditor(db *graph.Client) *Auditor {
-	return &Auditor{db: db, exp: NewGraphExpander(db, "RESOLVES_TO")}
+	return &Auditor{
+		db:      db,
+		exp:     NewGraphExpander(db, "RESOLVES_TO"),
+		Weights: DefaultWeights,
+		Now:     time.Now().Unix(),
+	}
 }
 
 // Reads is how many graph round trips the last audit made.
@@ -76,7 +92,7 @@ func (a *Auditor) Reads() int { return a.exp.Reads }
 
 // Audit walks out from a lockfile and reports who holds a key.
 func (a *Auditor) Audit(ctx context.Context, lf lockfile.Lockfile, opts Options) (Audit, error) {
-	out := Audit{Project: lf.Project, Format: lf.Format, Pins: len(lf.Pins)}
+	out := Audit{Project: lf.Project, Format: lf.Format, Pins: len(lf.Pins), Weights: a.Weights}
 
 	sources, err := a.knownVersions(ctx, lf.Pins)
 	if err != nil {
@@ -92,11 +108,41 @@ func (a *Auditor) Audit(ctx context.Context, lf lockfile.Lockfile, opts Options)
 		return Audit{}, err
 	}
 
-	out.Keyholders, out.UnionKeyholders, err = a.keyholders(ctx, out.Reach)
+	roster, held, err := a.keyholders(ctx, out.Reach)
 	if err != nil {
 		return Audit{}, err
 	}
+	out.UnionKeyholders = held.union
+
+	sampled, err := a.sampledVersions(ctx, reachedPackageList(out.Reach.Coexistence))
+	if err != nil {
+		return Audit{}, err
+	}
+	out.Signals = make(map[string]Signals, len(roster))
+	for _, k := range roster {
+		out.Signals[k.Handle] = signalsFor(k, held.count, sampled)
+	}
+
+	// Staleness is measured from the instant being asked about, so a query about last October does
+	// not call an account dormant for time that had not yet passed.
+	at := a.Now
+	if opts.Within != Always && opts.Within.From > 0 {
+		at = opts.Within.From
+	}
+
+	out.Keyholders, out.Scores = Ranked(roster, out.Signals, a.Weights, len(held.count), at)
+	out.Cuts = Cuts(out.Reach, out.Keyholders)
 	return out, nil
+}
+
+func reachedPackageList(coexistence map[string]Set) []string {
+	set := reachedPackages(coexistence)
+	out := make([]string, 0, len(set))
+	for pkg := range set {
+		out = append(out, pkg)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // knownVersions filters the lockfile's pins down to the versions the graph actually holds, and
@@ -154,12 +200,19 @@ func (a *Auditor) knownVersions(ctx context.Context, pins []lockfile.Pin) ([]Ent
 	return sources, nil
 }
 
+// roster is the by-product of building the keyholder list that the signals need: how many accounts
+// hold each reached package, and how many the union graph would have named.
+type roster struct {
+	count map[string]int
+	union int
+}
+
 // keyholders maps reached versions to the accounts that can publish them.
 //
 // A version is reached over a set of spans. The package owning it is publishable by whoever held
 // MAINTAINS over an overlapping span. Intersecting the two is what makes this an answer rather than
 // a list of everyone who has ever touched the tree.
-func (a *Auditor) keyholders(ctx context.Context, reach Result) ([]Keyholder, int, error) {
+func (a *Auditor) keyholders(ctx context.Context, reach Result) ([]Keyholder, roster, error) {
 	// Reached packages, with the spans over which any of their versions was reachable.
 	coexisting := map[string]Set{}
 	for versionURN, set := range reach.Coexistence {
@@ -190,11 +243,21 @@ func (a *Auditor) keyholders(ctx context.Context, reach Result) ([]Keyholder, in
 	byHandle := map[string]map[string]Set{}
 	unionHandles := map[string]bool{}
 
+	// holders is the accounts per package that held a key over a span the package was reached in.
+	// It is the denominator of the solo-maintainer signal, and it has to be counted here rather than
+	// derived from the roster afterwards: the roster is keyed by account, so an account holding two
+	// packages is one entry, and the per-package count cannot be recovered from it.
+	holders := map[string]map[string]bool{}
+
+	// since is when each account's rights begin, taken from the MAINTAINS edge before the query
+	// window clips anything.
+	since := map[string]int64{}
+
 	for start := 0; start < len(packages); start += sourceChunk {
 		end := min(start+sourceChunk, len(packages))
 		edges, err := a.maintains(ctx, packages[start:end])
 		if err != nil {
-			return nil, 0, err
+			return nil, roster{}, err
 		}
 		for _, e := range edges {
 			unionHandles[e.To] = true
@@ -209,22 +272,40 @@ func (a *Auditor) keyholders(ctx context.Context, reach Result) ([]Keyholder, in
 					byHandle[e.To] = map[string]Set{}
 				}
 				byHandle[e.To][e.From], _ = byHandle[e.To][e.From].Insert(held)
+
+				if holders[e.From] == nil {
+					holders[e.From] = map[string]bool{}
+				}
+				holders[e.From][e.To] = true
+
+				if prev, seen := since[e.To]; !seen || e.Valid.From < prev {
+					since[e.To] = e.Valid.From
+				}
 			}
 		}
 	}
 
 	out := make([]Keyholder, 0, len(byHandle))
 	for handle, through := range byHandle {
-		out = append(out, Keyholder{Handle: handle, Through: through})
+		out = append(out, Keyholder{Handle: handle, Through: through, Since: since[handle]})
 	}
-	// Most packages first, then by handle so the order is stable across runs.
+	// Most packages first, then by handle so the order is stable across runs. The risk ranking
+	// reorders this, but the reach order is what a caller sees if it does not.
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Packages() != out[j].Packages() {
 			return out[i].Packages() > out[j].Packages()
 		}
 		return out[i].Handle < out[j].Handle
 	})
-	return out, len(unionHandles), nil
+
+	// Every coexistence-reached package counts, including ones with no maintainer edge at all: a
+	// package nobody is recorded as holding still sits in the denominator of "how much of your tree
+	// does this account hold".
+	count := make(map[string]int, len(coexisting))
+	for pkg := range coexisting {
+		count[pkg] = len(holders[pkg])
+	}
+	return out, roster{count: count, union: len(unionHandles)}, nil
 }
 
 // maintains reads the MAINTAINS edges pointing at a set of packages, batched.
