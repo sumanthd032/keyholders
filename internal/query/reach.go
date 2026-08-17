@@ -51,8 +51,13 @@ type Result struct {
 	Truncated bool
 
 	// Edges is every edge the search read, keyed by source. It is retained so the union and
-	// coexistence passes share one set of graph reads.
+	// coexistence passes share one set of graph reads, and so that removal analysis can replay the
+	// search with a node taken out without going back to the graph.
 	Edges map[string][]Edge
+
+	// Sources and Opts are what the search ran with, kept for the same replay.
+	Sources []Entry
+	Opts    Options
 
 	// Kappa is the average number of maximal intervals held per reached node. The complexity of the
 	// search is O(E * kappa), and kappa being small is a hypothesis about npm rather than a
@@ -104,12 +109,14 @@ func Reach(ctx context.Context, exp Expander, sources []Entry, opts Options) (Re
 		Coexistence: map[string]Set{},
 		Union:       map[string]bool{},
 		Edges:       map[string][]Edge{},
+		Sources:     sources,
+		Opts:        opts,
 	}
 
 	if err := unionPass(ctx, exp, sources, opts, &res); err != nil {
 		return Result{}, err
 	}
-	coexistencePass(sources, opts, &res)
+	res.Coexistence = replay(sources, opts, res.Edges, nil, opts.OnFrontier)
 
 	var intervals int
 	for _, set := range res.Coexistence {
@@ -158,14 +165,24 @@ func unionPass(ctx context.Context, exp Expander, sources []Entry, opts Options,
 	return nil
 }
 
-// coexistencePass replays the cached edges with interval semantics.
+// replay walks the cached edges with interval semantics, returning the spans over which each node
+// was genuinely reached.
 //
 // This is the algorithm proper: frontier entries carry the running intersection, an edge whose
 // interval does not overlap it prunes the branch entirely, and a node already covered over the
 // candidate span is not re-expanded.
-func coexistencePass(sources []Entry, opts Options, res *Result) {
+//
+// blocked, when non-empty, removes those nodes from the graph: they are neither entered nor
+// expanded. That is how removal analysis asks what a project would still reach if one account's
+// packages were taken away, and because the edges are already in memory the question costs no I/O.
+func replay(sources []Entry, opts Options, edges map[string][]Edge, blocked map[string]bool, onFrontier func(Frontier)) map[string]Set {
+	reached := map[string]Set{}
+
 	var frontier []Entry
 	for _, s := range sources {
+		if blocked[s.URN] {
+			continue
+		}
 		// A source is reachable from itself only while it existed. Without this a query about a
 		// past instant reports versions published after it as though they were already installed,
 		// which is the same class of error as counting a path whose edges never coexisted.
@@ -173,40 +190,44 @@ func coexistencePass(sources []Entry, opts Options, res *Result) {
 		if start.Empty() {
 			continue
 		}
-		set, added := res.Coexistence[s.URN].Insert(start)
+		set, added := reached[s.URN].Insert(start)
 		if !added {
 			continue
 		}
-		res.Coexistence[s.URN] = set
+		reached[s.URN] = set
 		frontier = append(frontier, Entry{URN: s.URN, Valid: start})
 	}
-	if opts.OnFrontier != nil && len(frontier) > 0 {
-		opts.OnFrontier(Frontier{Depth: 0, Entries: frontier})
+	if onFrontier != nil && len(frontier) > 0 {
+		onFrontier(Frontier{Depth: 0, Entries: frontier})
 	}
 
 	for depth := 1; depth <= opts.MaxDepth && len(frontier) > 0; depth++ {
 		var next []Entry
 		for _, entry := range frontier {
-			for _, e := range res.Edges[entry.URN] {
+			for _, e := range edges[entry.URN] {
+				if blocked[e.To] {
+					continue
+				}
 				j := entry.Valid.Intersect(e.Valid)
 				if j.Empty() {
 					// The path to here and this edge were never valid at the same instant, so this
 					// chain never existed. Not for one second. This single test is the whole idea.
 					continue
 				}
-				set, added := res.Coexistence[e.To].Insert(j)
+				set, added := reached[e.To].Insert(j)
 				if !added {
 					continue
 				}
-				res.Coexistence[e.To] = set
+				reached[e.To] = set
 				next = append(next, Entry{URN: e.To, Valid: j})
 			}
 		}
 		frontier = next
-		if opts.OnFrontier != nil && len(frontier) > 0 {
-			opts.OnFrontier(Frontier{Depth: depth, Entries: frontier})
+		if onFrontier != nil && len(frontier) > 0 {
+			onFrontier(Frontier{Depth: depth, Entries: frontier})
 		}
 	}
+	return reached
 }
 
 // PhantomReach is the count of nodes the union graph claims are reachable but which no coexistence
