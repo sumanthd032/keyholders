@@ -434,6 +434,47 @@ so callers know to page with `SKIP` instead.
 
 ---
 
+## 20. `RETURN` takes a property or `count(*)`, and `count(<binding>)` is rejected with the wrong error
+
+A `MATCH` can project properties but not nodes or relationships. Anchored at a package with 288
+versions, so nothing here is about scan limits:
+
+```cypher
+MATCH (p:Package {id: 6436035704565390893})-[:HAS_VERSION]->(v) RETURN count(*)     AS n  -> 288
+MATCH (p:Package {id: 6436035704565390893})-[:HAS_VERSION]->(v) RETURN count(v.urn) AS n  -> 288
+MATCH (p:Package {id: 6436035704565390893})-[:HAS_VERSION]->(v) RETURN v.urn        AS u  -> rows
+
+MATCH (p:Package {id: 6436035704565390893})-[:HAS_VERSION]->(v) RETURN v AS node
+-> invalid_request
+   OpenCypher query is not supported yet: RETURN currently supports <binding>.<property> or count(*)
+```
+
+That message is clear and the restriction is easy to work with. The same restriction reached through
+an aggregate is not:
+
+```cypher
+MATCH (p:Package {id: 6436035704565390893})-[:HAS_VERSION]->(v) RETURN count(v) AS n
+MATCH (p:Package {id: 6436035704565390893})-[r:HAS_VERSION]->(v) RETURN count(r) AS n
+-> invalid_request
+   OpenCypher query is not supported yet: property values support integer, float, boolean, and
+   string literals
+```
+
+`count(v)` and `count(r)` are ordinary Cypher and the reported reason has nothing to do with what is
+wrong: nothing in either query writes a property value. We spent a while checking the `SAMPLED`
+edge writer for a bad property type before noticing that `count(*)` on the same pattern answers
+immediately. `count(DISTINCT v.urn)` is rejected separately, and that message does say what it means:
+`DISTINCT aggregate arguments are not executable in Query engine`.
+
+**Consequence for us.** Whole nodes are only ever read through `algo.MSpaths` and its `YIELD path`,
+which does hydrate both endpoints with all their properties (finding 18). Counting distinct things
+happens in Go. Neither is a hardship, since every read is anchored anyway.
+
+**Suggestion.** Report `count(<binding>)` with the same message the bare projection gets. The current
+one sends the reader looking at their writes.
+
+---
+
 ## What we changed in our design because of these
 
 | Finding | Design consequence |
@@ -449,3 +490,4 @@ so callers know to page with `SKIP` instead.
 | 17 | A result set that exactly fills `resultLimit` is treated as truncated and the source list is split. Silent undercounting is the one failure a reachability query must not have |
 | 18 | Interval intersection happens in the client, over the edge properties the path already carries. `MSpaths` with `maxLen: 1` is the batched frontier expander the interval search runs on |
 | 19 | Every read goes over Bolt. HTTP is kept for writes and for reads bounded well under 1,024 rows, and is no longer described as a general fallback |
+| 20 | Nodes are read through `MSpaths` and `YIELD path`, never projected from a `MATCH`. Distinct counts are taken in Go. Selecting a subset of versions is a separate edge type rather than a predicate, which is also what finding 12 forces |
