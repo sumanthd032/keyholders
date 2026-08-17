@@ -41,6 +41,10 @@ func main() {
 		err = runIngest(ctx, os.Args[2:])
 	case "scan":
 		err = runScan(ctx, os.Args[2:])
+	case "who":
+		err = runWho(ctx, os.Args[2:])
+	case "path":
+		err = runPath(ctx, os.Args[2:])
 	case "resolve":
 		err = runResolve(ctx, os.Args[2:])
 	case "verify":
@@ -65,6 +69,8 @@ func usage() {
 
 Commands:
   scan       audit a lockfile: who can execute code in this project
+  who        what one account reaches, and through which packages
+  path       the concrete chain from a project to what an account controls
   packages   write the ranked package list the ingest reads
   ingest     build the package, version and maintainer graph in HydraDB
   resolve    materialize RESOLVES_TO edges with their validity windows
