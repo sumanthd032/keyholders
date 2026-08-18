@@ -475,6 +475,43 @@ one sends the reader looking at their writes.
 
 ---
 
+## 21. An UNWIND vertex upsert must SET a label, even one the node already carries
+
+```cypher
+UNWIND $rows AS row
+MERGE (n {id: row.id})
+SET n.kri = row.kri, n.kri_at = row.at
+-> invalid_request
+   OpenCypher query is not supported yet: UNWIND vertex upsert requires exactly one SET label
+```
+
+Anchored, existing nodes, no new vertex being created, nothing about labelling in question, just two
+plain properties. Adding the label the node already has fixes it:
+
+```cypher
+UNWIND $rows AS row
+MERGE (n {id: row.id})
+SET n:Package, n.kri = row.kri, n.kri_at = row.at
+```
+
+**Why this took a while to notice.** Every UNWIND vertex upsert already in this codebase happens to
+satisfy the rule, but by accident rather than by design. Every one either creates a node, which needs
+a label regardless, or re-asserts a label already present alongside genuinely new properties, which
+looks like belt and suspenders rather than a requirement. This was the first write that only ever
+adds a property to a node that already exists with its label already set, which is what exposed that
+the label is not optional in this statement shape, load bearing or not.
+
+**Consequence for us.** `label` is interpolated into the statement text as a literal, one of exactly
+two known values, `Package` or `Maintainer`, chosen by the caller, never derived from row data. Labels
+are not parameterizable in Cypher in general, so this was going to be a literal either way; the
+finding is that it cannot be omitted even when nothing about it is changing.
+
+**Suggestion.** Accepting a SET clause with no label when the node already carries one, or naming the
+missing label in the error the way the conflicting property finding above does for its own case,
+would both turn this from a bisect into a one line fix.
+
+---
+
 ## What we changed in our design because of these
 
 | Finding | Design consequence |
@@ -490,4 +527,5 @@ one sends the reader looking at their writes.
 | 17 | A result set that exactly fills `resultLimit` is treated as truncated and the source list is split. Silent undercounting is the one failure a reachability query must not have |
 | 18 | Interval intersection happens in the client, over the edge properties the path already carries. `MSpaths` with `maxLen: 1` is the batched frontier expander the interval search runs on |
 | 19 | Every read goes over Bolt. HTTP is kept for writes and for reads bounded well under 1,024 rows, and is no longer described as a general fallback |
+| 21 | Every UNWIND vertex upsert SETs a label, even one already present, as a literal chosen by the caller |
 | 20 | Nodes are read through `MSpaths` and `YIELD path`, never projected from a `MATCH`. Distinct counts are taken in Go. Selecting a subset of versions is a separate edge type rather than a predicate, which is also what finding 12 forces |
