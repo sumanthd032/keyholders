@@ -7,26 +7,8 @@ import (
 	"github.com/sumanthd032/keyholders/internal/sketch"
 )
 
-// exactSketch is a plain set standing in for HyperLogLog, so the assertions below check specific
-// counts rather than an error band. Aggregation logic is what these tests exercise, not sketch
-// accuracy, which internal/sketch already covers on its own terms.
-type exactSketch struct{ members map[sketch.NodeID]bool }
-
-func newExactSketch() sketch.Sketch { return &exactSketch{members: map[sketch.NodeID]bool{}} }
-
-func (s *exactSketch) Add(n sketch.NodeID) { s.members[n] = true }
-
-func (s *exactSketch) Merge(other sketch.Sketch) {
-	o := other.(*exactSketch)
-	for n := range o.members {
-		s.members[n] = true
-	}
-}
-
-func (s *exactSketch) Count() int { return len(s.members) }
-
 func sketchOf(members ...string) sketch.Sketch {
-	sk := newExactSketch().(*exactSketch)
+	sk := sketch.NewExactSet()
 	for _, m := range members {
 		sk.Add(sketch.NodeID(m))
 	}
@@ -68,7 +50,7 @@ func TestAggregateUnionsControlledPackages(t *testing.T) {
 		"chalk":    {{handle: "azer", validFrom: 0, validTo: 1 << 40}, {handle: "sindresorhus", validFrom: 0, validTo: 1 << 40}},
 	}}
 
-	agg := Aggregator{Src: table, New: newExactSketch}
+	agg := Aggregator{Src: table, New: sketch.NewExactSet}
 	got, err := agg.Aggregate(context.Background(), packages, 500)
 	if err != nil {
 		t.Fatalf("Aggregate: %v", err)
@@ -99,7 +81,7 @@ func TestAggregateRespectsHandoverWindow(t *testing.T) {
 		},
 	}}
 
-	agg := Aggregator{Src: table, New: newExactSketch}
+	agg := Aggregator{Src: table, New: sketch.NewExactSet}
 
 	before, err := agg.Aggregate(context.Background(), packages, 50)
 	if err != nil {

@@ -6,25 +6,6 @@ import (
 	"testing"
 )
 
-// exactSketch is an uncompressed stand in for the HyperLogLog sketch task 3 builds. It is exact by
-// construction, which is what lets the assertions below check specific counts instead of an error
-// band. It lives only in this test file because the regression it guards is about the propagation
-// loop's cold start, not about sketch accuracy.
-type exactSketch struct{ members map[NodeID]bool }
-
-func newExactSketch() Sketch { return &exactSketch{members: map[NodeID]bool{}} }
-
-func (s *exactSketch) Add(n NodeID) { s.members[n] = true }
-
-func (s *exactSketch) Merge(other Sketch) {
-	o := other.(*exactSketch)
-	for n := range o.members {
-		s.members[n] = true
-	}
-}
-
-func (s *exactSketch) Count() int { return len(s.members) }
-
 // TestDeletionAcrossEpochs is the guard that has to exist before any other engine code: a
 // PKG_RESOLVES edge live in epoch 1 and dead in epoch 2 must make KRI at the edge's target decrease.
 // This is not a hypothetical failure mode: sketches merge by register-wise max, which only ever
@@ -45,7 +26,7 @@ func TestDeletionAcrossEpochs(t *testing.T) {
 		{From: "X", To: "Y"},
 	}
 
-	eng := &Engine{New: newExactSketch}
+	eng := &Engine{New: NewExactSet}
 
 	s1 := eng.RunEpoch(nodes, epoch1)
 	if got, want := s1["Z"].Count(), 3; got != want {
@@ -88,7 +69,7 @@ func TestRunEpochIsWorkerCountInvariant(t *testing.T) {
 
 	results := map[int]map[NodeID]Sketch{}
 	for _, workers := range []int{1, 3, 8} {
-		eng := &Engine{New: newExactSketch, Workers: workers}
+		eng := &Engine{New: NewExactSet, Workers: workers}
 		results[workers] = eng.RunEpoch(nodes, edges)
 	}
 
