@@ -51,6 +51,8 @@ func main() {
 		err = runVerify(ctx, os.Args[2:])
 	case "observatory":
 		err = runObservatory(ctx, os.Args[2:])
+	case "advisories":
+		err = runAdvisories(ctx, os.Args[2:])
 	case "typosquats":
 		err = runTyposquats(ctx, os.Args[2:])
 	case "-h", "--help", "help":
@@ -80,6 +82,7 @@ Commands:
   resolve      materialize RESOLVES_TO edges with their validity windows
   verify       cross-check the graph against deps.dev and rank maintainers by reach
   observatory  reachability for every maintainer across the whole graph, per epoch
+  advisories   ingest OSV's npm feed into Advisory nodes and AFFECTS edges
   typosquats   materialize TYPOSQUAT_OF edges from name similarity and rank
 
 Run a command with -h for its flags.
