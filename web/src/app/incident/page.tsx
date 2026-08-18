@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { Nav } from "@/components/Nav";
 import { IncidentWorkspace } from "@/components/IncidentWorkspace";
 
 export default function IncidentPage() {
@@ -11,9 +11,7 @@ export default function IncidentPage() {
             a package fell — who&apos;s exposed, and since when
           </p>
         </div>
-        <Link href="/" className="text-xs text-ramp-40 hover:text-ramp-80 underline underline-offset-2">
-          audit
-        </Link>
+        <Nav current="/incident" />
       </header>
       <IncidentWorkspace />
     </main>

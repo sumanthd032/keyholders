@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { Nav } from "@/components/Nav";
 import { AuditWorkspace } from "@/components/AuditWorkspace";
 
 export default function Home() {
@@ -11,12 +11,7 @@ export default function Home() {
             how many people can execute code on your machine, and who are they
           </p>
         </div>
-        <Link
-          href="/incident"
-          className="text-xs text-ramp-40 hover:text-ramp-80 underline underline-offset-2"
-        >
-          incident
-        </Link>
+        <Nav current="/" />
       </header>
       <AuditWorkspace />
     </main>

@@ -7,13 +7,21 @@ import (
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
 
+// nominalErrorBand is HyperLogLog's standard error, 1.04/sqrt(m), at precision 8, m = 256 registers,
+// the default `keyholders observatory` runs at. Nothing persists which precision actually produced a
+// given kri value, so this is the CLI's default assumed rather than read back per node; a run at a
+// different precision would make this wrong for that run's numbers. Persisting precision alongside
+// kri and kri_at, the same way D44 added kri_at, would remove the assumption; not done today.
+const nominalErrorBand = 1.04 / 16
+
 // LeaderboardEntry is one ranked row read back from a node's own kri and kri_at properties, written
 // by `keyholders observatory`. The API never recomputes the sketch pipeline itself: that is a batch
 // job on the order of a minute against the current ingest, and this is a read of its last result.
 type LeaderboardEntry struct {
-	Name string `json:"name"`
-	KRI  int64  `json:"kri"`
-	At   int64  `json:"kri_at"`
+	Name      string  `json:"name"`
+	KRI       int64   `json:"kri"`
+	At        int64   `json:"kri_at"`
+	ErrorBand float64 `json:"error_band"`
 }
 
 // ObservatoryView is the two leaderboards the dashboard needs. The orphaned-but-load-bearing view is
@@ -70,5 +78,5 @@ func entryFrom(rec *neo4j.Record) LeaderboardEntry {
 	n, _ := name.(string)
 	k, _ := kri.(int64)
 	a, _ := at.(int64)
-	return LeaderboardEntry{Name: n, KRI: k, At: a}
+	return LeaderboardEntry{Name: n, KRI: k, At: a, ErrorBand: nominalErrorBand}
 }
