@@ -138,6 +138,12 @@ export function IncidentWorkspace() {
         </button>
       </div>
 
+      {traversal.phase === "idle" && !report && (
+        <p className="px-8 py-6 text-xs text-ramp-40">
+          type a package@version and pick a recorded project to see its blast radius
+        </p>
+      )}
+
       {traversal.phase === "watching" && (
         <div className="px-8 py-4" aria-live="polite">
           <p className="tabular text-xs text-ramp-40 mb-3">

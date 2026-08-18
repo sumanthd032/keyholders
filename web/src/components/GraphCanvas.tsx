@@ -9,6 +9,7 @@ import {
 } from "reagraph";
 import type { Graph } from "@/lib/types";
 import { packageNameOf } from "@/lib/types";
+import { usePrefersReducedMotion } from "@/lib/useReducedMotion";
 
 // Matches the CSS token values in globals.css. Reagraph's theme is consumed by three.js material
 // props, not CSS, so the values are duplicated here rather than read from a custom property; see
@@ -68,6 +69,7 @@ export function GraphCanvas({
 }) {
   const [selected, setSelected] = useState<string | null>(null);
   const activeSelections = highlighted ?? (selected ? [selected] : []);
+  const reduceMotion = usePrefersReducedMotion();
 
   const nodes: ReagraphNode[] = useMemo(
     () =>
@@ -105,6 +107,7 @@ export function GraphCanvas({
           edges={edges}
           theme={theme}
           layoutType="forceDirected2d"
+          animated={!reduceMotion}
           selections={activeSelections}
           onNodeClick={(node) => {
             setSelected(node.id);
@@ -113,6 +116,50 @@ export function GraphCanvas({
           onCanvasClick={() => setSelected(null)}
         />
       </div>
+      <GraphTable graph={graph} />
     </div>
+  );
+}
+
+/**
+ * The table equivalent every graph view needs, per the interface design: an accessibility
+ * requirement, and also what people actually paste into an incident channel, where a WebGL canvas
+ * is not an option. Collapsed by default so it does not compete with the canvas for space, never
+ * hidden entirely.
+ */
+function GraphTable({ graph }: { graph: Graph }) {
+  return (
+    <details className="mt-3">
+      <summary className="text-[11px] text-ramp-40 cursor-pointer select-none">
+        table equivalent ({graph.nodes.length} packages, {graph.edges.length} edges)
+      </summary>
+      <div className="overflow-x-auto mt-2">
+        <table className="w-full text-left text-xs tabular">
+          <thead>
+            <tr className="text-ramp-40 border-b border-rule-1">
+              <th className="py-2 pr-4 font-normal">package</th>
+              <th className="py-2 pr-4 font-normal">coexistent</th>
+              <th className="py-2 pr-4 font-normal">depends on</th>
+            </tr>
+          </thead>
+          <tbody>
+            {graph.nodes.map((n) => (
+              <tr key={n.package} className="border-b border-rule-1/50">
+                <td className="py-2 pr-4 text-ramp-100">{packageNameOf(n.package)}</td>
+                <td className={`py-2 pr-4 ${n.coexistent ? "text-signal" : "text-danger"}`}>
+                  {n.coexistent ? "yes" : "no, phantom only"}
+                </td>
+                <td className="py-2 pr-4 text-ramp-60">
+                  {graph.edges
+                    .filter((e) => e.from === n.package)
+                    .map((e) => packageNameOf(e.to))
+                    .join(", ") || "-"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </details>
   );
 }

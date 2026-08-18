@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Keyholder } from "@/lib/types";
+import { usePrefersReducedMotion } from "@/lib/useReducedMotion";
 
 const WAVE_MS = 900;
 const MAX_WAVES = 6;
@@ -99,19 +100,5 @@ export function RollCall({
         }
       `}</style>
     </div>
-  );
-}
-
-function subscribeReducedMotion(callback: () => void) {
-  const query = window.matchMedia("(prefers-reduced-motion: reduce)");
-  query.addEventListener("change", callback);
-  return () => query.removeEventListener("change", callback);
-}
-
-function usePrefersReducedMotion(): boolean {
-  return useSyncExternalStore(
-    subscribeReducedMotion,
-    () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-    () => false, // server snapshot: no window, and the animation is a client-only enhancement anyway
   );
 }
