@@ -1,6 +1,10 @@
 package sketch
 
-import "testing"
+import (
+	"fmt"
+	"math/rand"
+	"testing"
+)
 
 // exactSketch is an uncompressed stand in for the HyperLogLog sketch task 3 builds. It is exact by
 // construction, which is what lets the assertions below check specific counts instead of an error
@@ -60,5 +64,75 @@ func TestDeletionAcrossEpochs(t *testing.T) {
 	// X -> Y still lives in epoch 2, so Y's own reach must be unaffected by Z's edge dying.
 	if got, want := s2["Y"].Count(), 2; got != want {
 		t.Errorf("epoch 2 KRI(Y) = %d, want %d: X -> Y still lives", got, want)
+	}
+}
+
+// TestRunEpochIsWorkerCountInvariant checks that splitting the edge list across more workers never
+// changes the answer. The fixpoint of a monotone merge over a finite set of nodes is unique, so this
+// is not tolerance for parallel noise, it is a hard equality: any worker count that disagrees with
+// running single threaded has a real bug in how a round is split or folded back together, not an
+// acceptable variance in a parallel algorithm.
+//
+// The graph is a diamond, so two paths arrive at D, feeding into a cycle back to A, so convergence
+// needs several rounds under either worker count rather than settling on the first pass.
+func TestRunEpochIsWorkerCountInvariant(t *testing.T) {
+	nodes := []NodeID{"A", "B", "C", "D", "E"}
+	edges := []Edge{
+		{From: "A", To: "B"},
+		{From: "A", To: "C"},
+		{From: "B", To: "D"},
+		{From: "C", To: "D"},
+		{From: "D", To: "E"},
+		{From: "E", To: "A"},
+	}
+
+	results := map[int]map[NodeID]Sketch{}
+	for _, workers := range []int{1, 3, 8} {
+		eng := &Engine{New: newExactSketch, Workers: workers}
+		results[workers] = eng.RunEpoch(nodes, edges)
+	}
+
+	for _, n := range nodes {
+		want := results[1][n].Count()
+		for _, workers := range []int{3, 8} {
+			if got := results[workers][n].Count(); got != want {
+				t.Errorf("node %s: 1 worker gives %d, %d workers gives %d", n, want, workers, got)
+			}
+		}
+	}
+}
+
+// buildLayeredGraph makes a synthetic dependency graph shaped like a real one: each node depends on
+// a handful of nodes ranked after it, which keeps it acyclic and gives BenchmarkRunEpoch something
+// with real fan out to propagate through rather than a worst case adversarial shape.
+func buildLayeredGraph(nodeCount, fanout int) ([]NodeID, []Edge) {
+	nodes := make([]NodeID, nodeCount)
+	for i := range nodes {
+		nodes[i] = NodeID(fmt.Sprintf("n%d", i))
+	}
+
+	rng := rand.New(rand.NewSource(1))
+	edges := make([]Edge, 0, nodeCount*fanout)
+	for i := 0; i < nodeCount-1; i++ {
+		for k := 0; k < fanout; k++ {
+			j := i + 1 + rng.Intn(nodeCount-i-1)
+			edges = append(edges, Edge{From: nodes[i], To: nodes[j]})
+		}
+	}
+	return nodes, edges
+}
+
+// BenchmarkRunEpoch measures whether splitting work across workers actually helps, rather than
+// assuming that adding goroutines to a merge loop pays for itself. Sub-benchmarks share one graph so
+// the comparison isolates the worker count.
+func BenchmarkRunEpoch(b *testing.B) {
+	nodes, edges := buildLayeredGraph(20_000, 5)
+	for _, workers := range []int{1, 2, 4, 8} {
+		b.Run(fmt.Sprintf("workers=%d", workers), func(b *testing.B) {
+			eng := &Engine{New: func() Sketch { return NewHLL(8) }, Workers: workers}
+			for b.Loop() {
+				eng.RunEpoch(nodes, edges)
+			}
+		})
 	}
 }

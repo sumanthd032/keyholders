@@ -11,6 +11,11 @@
 // at the cost of reporting reach between packages rather than between exact versions.
 package sketch
 
+import (
+	"runtime"
+	"sync"
+)
+
 // NodeID identifies a package for the purposes of propagation. The observatory keys it by the
 // package's graph id; nothing in this package depends on what a node id actually is.
 type NodeID string
@@ -44,6 +49,16 @@ type NewSketch func() Sketch
 // behind for the next call to inherit. TestDeletionAcrossEpochs is the guard on that property.
 type Engine struct {
 	New NewSketch
+
+	// Workers is how many goroutines share each round's edge list. Zero means GOMAXPROCS.
+	Workers int
+}
+
+func (e *Engine) workers() int {
+	if e.Workers > 0 {
+		return e.Workers
+	}
+	return runtime.GOMAXPROCS(0)
 }
 
 // RunEpoch computes a sketch for every node in nodes, cold started at S[v] = {v}, then propagates
@@ -56,15 +71,25 @@ type Engine struct {
 // dies between epochs. Carrying state forward would make the KRI curve monotonically increasing and
 // entirely plausible for a growing ecosystem, which is exactly what would let the bug survive to a
 // demo instead of getting caught by one.
+//
+// Each round is a full recompute from the previous round's result rather than an in-place update of
+// one shared map: workers only ever read the previous round's sketches, never mutate them, and each
+// worker builds its own private map for the edges it was handed, so two goroutines never call Merge
+// on the same object and never write the same map at the same time. That is what "workers need no
+// coordination" means in practice; splitting edges by target node and mutating one shared map in
+// place would still race, because a source read by one worker can be a target another worker is
+// concurrently merging into. Folding the round's partial results together, and seeding every node at
+// its cold start floor of {v}, happens single threaded between rounds, which costs little next to
+// the merge work the round just parallelised.
 func (e *Engine) RunEpoch(nodes []NodeID, edges []Edge) map[NodeID]Sketch {
-	s := make(map[NodeID]Sketch, len(nodes))
+	cur := make(map[NodeID]Sketch, len(nodes))
 	seed := func(n NodeID) {
-		if _, ok := s[n]; ok {
+		if _, ok := cur[n]; ok {
 			return
 		}
 		sk := e.New()
 		sk.Add(n)
-		s[n] = sk
+		cur[n] = sk
 	}
 	for _, n := range nodes {
 		seed(n)
@@ -74,15 +99,78 @@ func (e *Engine) RunEpoch(nodes []NodeID, edges []Edge) map[NodeID]Sketch {
 		seed(edge.To)
 	}
 
+	chunks := splitEdges(edges, e.workers())
+
 	for changed := true; changed; {
+		partials := make([]map[NodeID]Sketch, len(chunks))
+		var wg sync.WaitGroup
+		for i, chunk := range chunks {
+			i, chunk := i, chunk
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				partials[i] = mergeChunk(e.New, cur, chunk)
+			}()
+		}
+		wg.Wait()
+
+		next := make(map[NodeID]Sketch, len(cur))
+		for n := range cur {
+			sk := e.New()
+			sk.Add(n)
+			next[n] = sk
+		}
+		for _, part := range partials {
+			for n, sk := range part {
+				next[n].Merge(sk)
+			}
+		}
+
 		changed = false
-		for _, edge := range edges {
-			before := s[edge.To].Count()
-			s[edge.To].Merge(s[edge.From])
-			if s[edge.To].Count() != before {
+		for n, sk := range next {
+			if sk.Count() != cur[n].Count() {
 				changed = true
 			}
 		}
+		cur = next
 	}
-	return s
+	return cur
+}
+
+// mergeChunk computes, for one worker's slice of edges, a fresh sketch per target holding the merge
+// of every source that edge slice points at into it. It only reads cur, never writes to it, which is
+// what makes it safe to run concurrently with the same call over a different chunk.
+func mergeChunk(newSketch NewSketch, cur map[NodeID]Sketch, chunk []Edge) map[NodeID]Sketch {
+	local := make(map[NodeID]Sketch)
+	for _, edge := range chunk {
+		dst, ok := local[edge.To]
+		if !ok {
+			dst = newSketch()
+			local[edge.To] = dst
+		}
+		dst.Merge(cur[edge.From])
+	}
+	return local
+}
+
+// splitEdges divides edges into at most n contiguous, roughly equal chunks, fewer if there are not
+// enough edges to give every worker something to do.
+func splitEdges(edges []Edge, n int) [][]Edge {
+	if n > len(edges) {
+		n = len(edges)
+	}
+	if n <= 1 {
+		return [][]Edge{edges}
+	}
+
+	chunks := make([][]Edge, 0, n)
+	size := (len(edges) + n - 1) / n
+	for start := 0; start < len(edges); start += size {
+		end := start + size
+		if end > len(edges) {
+			end = len(edges)
+		}
+		chunks = append(chunks, edges[start:end])
+	}
+	return chunks
 }
