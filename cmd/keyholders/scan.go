@@ -119,13 +119,13 @@ func reportScan(a query.Audit, elapsed time.Duration, reads, top int, at string)
 
 	// The two counts sit next to each other permanently. The gap is the whole argument, and hiding
 	// it would make this look like every other tool's number.
-	r := counts(a)
+	r := a.Counts()
 	fmt.Printf("  %-13s %8s %10s %9s\n", "", "keyholders", "packages", "versions")
-	fmt.Printf("  coexistence   %8d %10d %9d\n", len(a.Keyholders), r.coPackages, r.coVersions)
-	fmt.Printf("  union graph   %8d %10d %9d\n", a.UnionKeyholders, r.unionPackages, r.unionVersions)
+	fmt.Printf("  coexistence   %8d %10d %9d\n", len(a.Keyholders), r.CoexistencePackages, r.CoexistenceVersions)
+	fmt.Printf("  union graph   %8d %10d %9d\n", a.UnionKeyholders, r.UnionPackages, r.UnionVersions)
 	fmt.Printf("  phantom       %8d %10d %9d   (%s of versions)\n",
-		a.PhantomKeyholders(), r.unionPackages-r.coPackages, r.unionVersions-r.coVersions,
-		percent(r.unionVersions-r.coVersions, r.unionVersions))
+		a.PhantomKeyholders(), r.UnionPackages-r.CoexistencePackages, r.UnionVersions-r.CoexistenceVersions,
+		percent(r.UnionVersions-r.CoexistenceVersions, r.UnionVersions))
 
 	fmt.Printf("\n  coverage      %d of %d locked packages are in the graph\n", a.Sources, a.Pins)
 	if a.Sources < a.Pins {
@@ -232,33 +232,6 @@ func reportWeights(w query.Weights) {
 	fmt.Printf("  built from fewer terms is not the same as a low score\n")
 }
 
-// reach counts what each semantics reached. Both sides are counted the same way at both
-// granularities, because the difference between them shows up at version level first: two versions
-// of one package can be reachable through paths that never coexisted while the package itself stays
-// reachable through one that did.
-type reach struct {
-	coPackages, coVersions       int
-	unionPackages, unionVersions int
-}
-
-func counts(a query.Audit) reach {
-	co := map[string]bool{}
-	for versionURN := range a.Reach.Coexistence {
-		if p := query.PackageURNOf(versionURN); p != "" {
-			co[p] = true
-		}
-	}
-	un := map[string]bool{}
-	for versionURN := range a.Reach.Union {
-		if p := query.PackageURNOf(versionURN); p != "" {
-			un[p] = true
-		}
-	}
-	return reach{
-		coPackages: len(co), coVersions: len(a.Reach.Coexistence),
-		unionPackages: len(un), unionVersions: len(a.Reach.Union),
-	}
-}
 
 func percent(part, whole int) string {
 	if whole == 0 {
@@ -327,110 +300,10 @@ func openOrDate(t int64) string {
 	return time.Unix(t, 0).UTC().Format("2006-01-02")
 }
 
-// emitJSON writes the whole audit, including the decomposed score and the removal analysis.
-//
-// The terms are emitted individually rather than as the total alone, and every fraction keeps its
-// denominator, so a consumer can re-derive the ranking or re-weight it. A score handed over as one
-// number is not auditable by whoever receives it, which defeats the reason it is a formula.
+// emitJSON writes the whole audit through query.AuditView, the same shape the web API serves, so the
+// two surfaces cannot silently drift into different answers for the same computation.
 func emitJSON(a query.Audit, elapsed time.Duration) error {
-	r := counts(a)
-	type fractionJSON struct {
-		Count int  `json:"count"`
-		Of    int  `json:"of"`
-		Known bool `json:"known"`
-	}
-	type termJSON struct {
-		Name         string  `json:"name"`
-		Value        float64 `json:"value"`
-		Weight       float64 `json:"weight"`
-		Known        bool    `json:"known"`
-		Contribution float64 `json:"contribution"`
-		Detail       string  `json:"detail"`
-	}
-	type keyholder struct {
-		Handle        string       `json:"handle"`
-		Packages      int          `json:"packages"`
-		Holds         []string     `json:"holds"`
-		Since         int64        `json:"since,omitempty"`
-		Risk          float64      `json:"risk"`
-		Terms         []termJSON   `json:"risk_terms"`
-		Solo          fractionJSON `json:"solo"`
-		NoProvenance  fractionJSON `json:"no_provenance"`
-		InstallScript fractionJSON `json:"install_script"`
-		LastPublish   int64        `json:"last_publish,omitempty"`
-		LastRelease   int64        `json:"last_release,omitempty"`
-	}
-	type cutJSON struct {
-		Handle        string   `json:"handle"`
-		Controls      int      `json:"controls"`
-		PackagesLost  int      `json:"packages_lost"`
-		VersionsLost  int      `json:"versions_lost"`
-		Downstream    int      `json:"downstream_lost"`
-		Orphaned      []string `json:"orphaned"`
-		Irreplaceable bool     `json:"irreplaceable"`
-	}
-	out := struct {
-		Project              string         `json:"project"`
-		Format               string         `json:"format"`
-		Pins                 int            `json:"pins"`
-		Sources              int            `json:"sources_in_graph"`
-		Keyholders           []keyholder    `json:"keyholders"`
-		KeyholderCount       int            `json:"keyholder_count"`
-		UnionKeyholders      int            `json:"union_keyholder_count"`
-		PhantomKeyholders    int            `json:"phantom_keyholder_count"`
-		PackagesReached      int            `json:"packages_reached"`
-		UnionPackagesReached int            `json:"union_packages_reached"`
-		VersionsReached      int            `json:"versions_reached"`
-		UnionVersionsReached int            `json:"union_versions_reached"`
-		Cuts                 []cutJSON      `json:"cuts"`
-		Weights              query.Weights  `json:"weights"`
-		Depth                int            `json:"depth"`
-		Truncated            bool           `json:"truncated"`
-		Kappa                float64        `json:"kappa"`
-		ElapsedMS            int64          `json:"elapsed_ms"`
-	}{
-		Project: a.Project, Format: a.Format, Pins: a.Pins, Sources: a.Sources,
-		KeyholderCount: len(a.Keyholders), UnionKeyholders: a.UnionKeyholders,
-		PhantomKeyholders: a.PhantomKeyholders(),
-		PackagesReached:   r.coPackages, UnionPackagesReached: r.unionPackages,
-		VersionsReached: r.coVersions, UnionVersionsReached: r.unionVersions,
-		Weights: a.Weights,
-		Depth:   a.Reach.Depth, Truncated: a.Reach.Truncated,
-		Kappa: a.Reach.Kappa, ElapsedMS: elapsed.Milliseconds(),
-	}
-
-	frac := func(f query.Fraction) fractionJSON {
-		return fractionJSON{Count: f.Count, Of: f.Of, Known: f.Known()}
-	}
-	for _, k := range a.Keyholders {
-		s, score := a.Signals[k.Handle], a.Scores[k.Handle]
-		e := keyholder{
-			Handle: k.Handle, Packages: k.Packages(), Since: k.Since, Risk: score.Total,
-			Solo: frac(s.Solo), NoProvenance: frac(s.NoProvenance),
-			InstallScript: frac(s.InstallScript),
-			LastPublish:   s.LastPublish, LastRelease: s.LastRelease,
-		}
-		for pkg := range k.Through {
-			e.Holds = append(e.Holds, pkg)
-		}
-		sort.Strings(e.Holds)
-		for _, t := range score.Terms {
-			e.Terms = append(e.Terms, termJSON{
-				Name: t.Name, Value: t.Value, Weight: t.Weight, Known: t.Known,
-				Contribution: t.Contribution(), Detail: t.Detail,
-			})
-		}
-		out.Keyholders = append(out.Keyholders, e)
-	}
-	for _, c := range a.Cuts {
-		out.Cuts = append(out.Cuts, cutJSON{
-			Handle: c.Handle, Controls: c.Controls, PackagesLost: c.Packages,
-			VersionsLost: c.Versions, Downstream: c.Beyond, Orphaned: c.Orphaned,
-			Irreplaceable: c.Irreplaceable(),
-		})
-	}
-
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	return enc.Encode(out)
+	return enc.Encode(query.NewAuditView(a, elapsed))
 }
