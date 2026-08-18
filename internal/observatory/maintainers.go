@@ -27,24 +27,35 @@ type Aggregator struct {
 // keeps this a merge over results already in hand rather than a walk starting from the maintainer
 // side of the graph, where the set of accounts to start from is unbounded and the direction back to
 // a package's reach is not a single traversal.
-func (a Aggregator) Aggregate(ctx context.Context, packages map[sketch.NodeID]sketch.Sketch, at int64) (map[sketch.NodeID]sketch.Sketch, error) {
-	out := make(map[sketch.NodeID]sketch.Sketch)
+//
+// It also returns every package that lookup found holds no maintainer at all, the orphaned set
+// task 8's derived view ranks by reach. Reporting it here rather than with a second pass is not an
+// optimisation bolted on afterward: finding an orphan and crediting a holder are the same read, one
+// per package, and asking the graph the same question twice to answer two different views of it
+// would be exactly the kind of avoidable cost this project has spent every prior task measuring
+// against.
+func (a Aggregator) Aggregate(ctx context.Context, packages map[sketch.NodeID]sketch.Sketch, at int64) (maintainers map[sketch.NodeID]sketch.Sketch, orphaned []sketch.NodeID, err error) {
+	maintainers = make(map[sketch.NodeID]sketch.Sketch)
 	for name, pkgSketch := range packages {
 		holders, err := a.Src.Maintainers(ctx, string(name), at)
 		if err != nil {
-			return nil, fmt.Errorf("maintainers of %s: %w", name, err)
+			return nil, nil, fmt.Errorf("maintainers of %s: %w", name, err)
+		}
+		if len(holders) == 0 {
+			orphaned = append(orphaned, name)
+			continue
 		}
 		for _, handle := range holders {
 			id := sketch.NodeID(handle)
-			acc, ok := out[id]
+			acc, ok := maintainers[id]
 			if !ok {
 				acc = a.New()
-				out[id] = acc
+				maintainers[id] = acc
 			}
 			acc.Merge(pkgSketch)
 		}
 	}
-	return out, nil
+	return maintainers, orphaned, nil
 }
 
 // Maintainers reads accounts that held a package at instant t, anchored at the package id and

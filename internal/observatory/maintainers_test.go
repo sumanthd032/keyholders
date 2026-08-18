@@ -51,9 +51,12 @@ func TestAggregateUnionsControlledPackages(t *testing.T) {
 	}}
 
 	agg := Aggregator{Src: table, New: sketch.NewExactSet}
-	got, err := agg.Aggregate(context.Background(), packages, 500)
+	got, orphaned, err := agg.Aggregate(context.Background(), packages, 500)
 	if err != nil {
 		t.Fatalf("Aggregate: %v", err)
+	}
+	if len(orphaned) != 0 {
+		t.Errorf("both packages have a maintainer, want no orphans, got %v", orphaned)
 	}
 
 	// azer controls both packages: union of {left-pad, some-cli} and {chalk, some-cli, some-logger}.
@@ -83,7 +86,7 @@ func TestAggregateRespectsHandoverWindow(t *testing.T) {
 
 	agg := Aggregator{Src: table, New: sketch.NewExactSet}
 
-	before, err := agg.Aggregate(context.Background(), packages, 50)
+	before, _, err := agg.Aggregate(context.Background(), packages, 50)
 	if err != nil {
 		t.Fatalf("Aggregate: %v", err)
 	}
@@ -94,7 +97,7 @@ func TestAggregateRespectsHandoverWindow(t *testing.T) {
 		t.Errorf("dominictarr's reach before handover = %d, want 2", got)
 	}
 
-	after, err := agg.Aggregate(context.Background(), packages, 500)
+	after, _, err := agg.Aggregate(context.Background(), packages, 500)
 	if err != nil {
 		t.Fatalf("Aggregate: %v", err)
 	}
@@ -103,5 +106,33 @@ func TestAggregateRespectsHandoverWindow(t *testing.T) {
 	}
 	if got := after[sketch.NodeID("right9ctrl")].Count(); got != 2 {
 		t.Errorf("right9ctrl's reach after handover = %d, want 2", got)
+	}
+}
+
+// TestAggregateReportsOrphans checks the other half of what one pass over the package list buys:
+// a package whose only maintainer's tenure already ended, and nobody has taken it over, must show up
+// as orphaned rather than silently vanishing from the maintainer leaderboard with no trace of why.
+func TestAggregateReportsOrphans(t *testing.T) {
+	packages := map[sketch.NodeID]sketch.Sketch{
+		"left-pad":  sketchOf("left-pad", "some-cli"),
+		"abandoned": sketchOf("abandoned", "big-app", "bigger-app"),
+	}
+	table := &maintainerTable{holdings: map[string][]holding{
+		"left-pad": {{handle: "azer", validFrom: 0, validTo: 1 << 40}},
+		// abandoned had a maintainer once, but their tenure ended and nobody replaced them.
+		"abandoned": {{handle: "someone", validFrom: 0, validTo: 100}},
+	}}
+
+	agg := Aggregator{Src: table, New: sketch.NewExactSet}
+	maintainers, orphaned, err := agg.Aggregate(context.Background(), packages, 500)
+	if err != nil {
+		t.Fatalf("Aggregate: %v", err)
+	}
+
+	if len(orphaned) != 1 || orphaned[0] != "abandoned" {
+		t.Errorf("orphaned = %v, want [abandoned]", orphaned)
+	}
+	if _, ok := maintainers[sketch.NodeID("someone")]; ok {
+		t.Error("someone's tenure ended before the queried instant and should not be credited")
 	}
 }
