@@ -1,11 +1,13 @@
 "use client";
 
-import { useRef, useState } from "react";
-import { streamAudit } from "@/lib/auditStream";
+import { useEffect, useRef, useState } from "react";
+import { fetchAudit, streamAudit } from "@/lib/auditStream";
+import { fetchTimeline, type TimelineSample } from "@/lib/timeline";
 import type { AuditView, Frontier } from "@/lib/types";
 import { UploadZone } from "./UploadZone";
 import { RollCall } from "./RollCall";
 import { DualCounter } from "./DualCounter";
+import { ExposureRiver } from "./ExposureRiver";
 import { GraphCanvas } from "./GraphCanvas";
 import { CutPanel } from "./CutPanel";
 import { Roster } from "./Roster";
@@ -20,8 +22,11 @@ type State =
 export function AuditWorkspace() {
   const [state, setState] = useState<State>({ phase: "idle" });
   const [cutHandle, setCutHandle] = useState<string | null>(null);
+  const [timeline, setTimeline] = useState<TimelineSample[]>([]);
+  const [selectedAt, setSelectedAt] = useState<number | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
   const runIdRef = useRef(0);
+  const fileRef = useRef<File | null>(null);
 
   function runAudit(file: File) {
     controllerRef.current?.abort();
@@ -29,7 +34,10 @@ export function AuditWorkspace() {
     controllerRef.current = controller;
     const runId = ++runIdRef.current;
 
+    fileRef.current = file;
     setCutHandle(null);
+    setTimeline([]);
+    setSelectedAt(null);
     setState({ phase: "searching", fileName: file.name, depth: 0, reached: 0 });
 
     streamAudit(file, controller.signal, {
@@ -50,6 +58,33 @@ export function AuditWorkspace() {
       if (controller.signal.aborted) return;
       setState({ phase: "error", message: String(err) });
     });
+  }
+
+  // Fetched once the search settles, keyed on runId rather than on every audit swap: scrubbing
+  // replaces state.audit repeatedly without changing runId, and the timeline itself does not change
+  // just because the selected instant did.
+  useEffect(() => {
+    if (state.phase !== "done" || !fileRef.current) return;
+    const file = fileRef.current;
+    let cancelled = false;
+    fetchTimeline(file).then((samples) => {
+      if (!cancelled) setTimeline(samples);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.phase === "done" ? state.runId : null]);
+
+  function scrubTo(at: number) {
+    const file = fileRef.current;
+    if (!file || (state.phase !== "done" && state.phase !== "revealing")) return;
+    setSelectedAt(at);
+    const runId = state.runId;
+    fetchAudit(file, at).then(
+      (audit) => setState({ phase: "done", audit, runId }),
+      (err) => setState({ phase: "error", message: String(err) }),
+    );
   }
 
   if (state.phase === "idle") {
@@ -125,6 +160,9 @@ export function AuditWorkspace() {
       />
 
       <DualCounter audit={audit} />
+      {timeline.length > 0 && (
+        <ExposureRiver samples={timeline} selectedAt={selectedAt} onScrub={scrubTo} />
+      )}
       <GraphCanvas
         graph={audit.graph}
         highlighted={cutPackages(audit, cutHandle)}

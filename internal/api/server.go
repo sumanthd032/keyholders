@@ -37,6 +37,7 @@ func (s *Server) Mux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/audit", s.handleAudit)
 	mux.HandleFunc("POST /api/audit/stream", s.handleAuditStream)
+	mux.HandleFunc("POST /api/audit/timeline", s.handleAuditTimeline)
 	mux.HandleFunc("GET /api/who/{handle}", s.handleWho)
 	mux.HandleFunc("GET /api/observatory", s.handleObservatory)
 	mux.HandleFunc("GET /api/projects", s.handleProjects)
