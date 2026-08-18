@@ -39,7 +39,9 @@ func (s *Server) Mux() http.Handler {
 	mux.HandleFunc("POST /api/audit/stream", s.handleAuditStream)
 	mux.HandleFunc("GET /api/who/{handle}", s.handleWho)
 	mux.HandleFunc("GET /api/observatory", s.handleObservatory)
+	mux.HandleFunc("GET /api/projects", s.handleProjects)
 	mux.HandleFunc("GET /api/incident/{name}/{version}", s.handleIncident)
+	mux.HandleFunc("GET /api/incident/{name}/{version}/stream", s.handleIncidentStream)
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

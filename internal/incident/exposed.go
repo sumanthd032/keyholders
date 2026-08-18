@@ -11,8 +11,8 @@ import (
 
 // RecordedProject is one project this graph already has LOCKS pins for, from a prior `scan --record`.
 type RecordedProject struct {
-	Name     string
-	LockedAt int64
+	Name     string `json:"name"`
+	LockedAt int64  `json:"locked_at"`
 }
 
 // ExposedProject is one recorded project whose coexistence-constrained reach, evaluated at the

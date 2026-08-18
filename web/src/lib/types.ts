@@ -91,6 +91,65 @@ export type Frontier = {
   urns: string[];
 };
 
+export type RecordedProject = {
+  name: string;
+  locked_at: number;
+};
+
+export type AdvisoryInfo = {
+  id: string;
+  summary: string;
+  severity: string;
+};
+
+export type DependencyRef = { name: string; range: string };
+export type DependencyChange = { name: string; from: string; to: string };
+export type DependencyDiff = {
+  added: DependencyRef[];
+  removed: DependencyRef[];
+  changed: DependencyChange[];
+};
+export type Introduction = {
+  package: string;
+  first_affected: string;
+  published_at: number;
+  previous?: string;
+  diff: DependencyDiff;
+};
+
+export type ExposedProject = { project: string; locked_at: number };
+export type ResolvedLiveExposure = {
+  project: string;
+  locked_at: number;
+  dependent: string;
+  valid_from: number;
+  valid_to: number;
+};
+export type SharedMaintainer = { maintainer: string; package: string };
+export type TyposquatNeighbor = {
+  name: string;
+  direction: string;
+  distance: number;
+  popularity_ratio: number;
+};
+
+export type IncidentView = {
+  package: string;
+  version: string;
+  advisories: AdvisoryInfo[];
+  introductions: Introduction[];
+  exposed: ExposedProject[];
+  resolved_while_live: ResolvedLiveExposure[];
+  shared_maintainers: SharedMaintainer[];
+  typosquats: TyposquatNeighbor[];
+};
+
+export type IncidentTraversalDone = {
+  audit: AuditView;
+  target: string;
+  reached: boolean;
+};
+
 /** package name from a package or version URN: "pkg:npm/left-pad@1.0.0" -> "left-pad". */
 export function packageNameOf(urn: string): string {
   const withoutScheme = urn.replace(/^pkg:[^/]+\//, "");
@@ -102,4 +161,13 @@ export function packageNameOf(urn: string): string {
     return withoutScheme.slice(0, at);
   }
   return withoutScheme;
+}
+
+/** package URN from a version URN: "pkg:npm/left-pad@1.0.0" -> "pkg:npm/left-pad". Keeps the scheme
+ * and ecosystem prefix, unlike packageNameOf, since this is used to match graph node ids rather than
+ * to display a label. */
+export function packageURNOf(versionURN: string): string {
+  const at = versionURN.lastIndexOf("@");
+  const slash = versionURN.indexOf("/");
+  return at > slash ? versionURN.slice(0, at) : versionURN;
 }
