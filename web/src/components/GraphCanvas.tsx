@@ -54,11 +54,20 @@ const theme: Theme = {
 export function GraphCanvas({
   graph,
   onSelectPackage,
+  highlighted,
 }: {
   graph: Graph;
   onSelectPackage?: (pkg: string) => void;
+  /**
+   * Externally controlled highlight set, for Cut a head: the packages a removal analysis found
+   * would be lost. Takes over from click-driven selection while set, since the two mean different
+   * things, one node the user picked versus every node one removal would cost, and showing both at
+   * once would blur that distinction rather than clarify it.
+   */
+  highlighted?: string[];
 }) {
   const [selected, setSelected] = useState<string | null>(null);
+  const activeSelections = highlighted ?? (selected ? [selected] : []);
 
   const nodes: ReagraphNode[] = useMemo(
     () =>
@@ -96,7 +105,7 @@ export function GraphCanvas({
           edges={edges}
           theme={theme}
           layoutType="forceDirected2d"
-          selections={selected ? [selected] : []}
+          selections={activeSelections}
           onNodeClick={(node) => {
             setSelected(node.id);
             onSelectPackage?.(node.id);

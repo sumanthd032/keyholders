@@ -7,6 +7,7 @@ import { UploadZone } from "./UploadZone";
 import { RollCall } from "./RollCall";
 import { DualCounter } from "./DualCounter";
 import { GraphCanvas } from "./GraphCanvas";
+import { CutPanel } from "./CutPanel";
 import { Roster } from "./Roster";
 
 type State =
@@ -18,6 +19,7 @@ type State =
 
 export function AuditWorkspace() {
   const [state, setState] = useState<State>({ phase: "idle" });
+  const [cutHandle, setCutHandle] = useState<string | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
   const runIdRef = useRef(0);
 
@@ -27,6 +29,7 @@ export function AuditWorkspace() {
     controllerRef.current = controller;
     const runId = ++runIdRef.current;
 
+    setCutHandle(null);
     setState({ phase: "searching", fileName: file.name, depth: 0, reached: 0 });
 
     streamAudit(file, controller.signal, {
@@ -124,6 +127,7 @@ export function AuditWorkspace() {
       <DualCounter audit={audit} />
       <GraphCanvas
         graph={audit.graph}
+        highlighted={cutPackages(audit, cutHandle)}
         onSelectPackage={(pkg) => {
           const holder = audit.keyholders.find((k) => k.holds.includes(pkg));
           if (holder) {
@@ -133,7 +137,20 @@ export function AuditWorkspace() {
           }
         }}
       />
+      <CutPanel cuts={audit.cuts} selected={cutHandle} onSelect={setCutHandle} />
       <Roster audit={audit} />
     </div>
   );
+}
+
+/** Every package a removal analysis found would be lost: what the account holds directly, plus
+ * whatever the server found orphaned downstream. Returns undefined rather than [] when nothing is
+ * selected, so GraphCanvas falls back to its own click-driven selection instead of highlighting an
+ * empty set. */
+function cutPackages(audit: AuditView, handle: string | null): string[] | undefined {
+  if (!handle) return undefined;
+  const cut = audit.cuts.find((c) => c.handle === handle);
+  const holder = audit.keyholders.find((k) => k.handle === handle);
+  if (!cut || !holder) return undefined;
+  return [...holder.holds, ...(cut.orphaned ?? [])];
 }
