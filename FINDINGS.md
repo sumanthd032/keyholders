@@ -512,6 +512,46 @@ would both turn this from a bisect into a one line fix.
 
 ---
 
+## 22. A shared edge type with a filtered property read faster than one type per epoch, not slower
+
+The step 7 physical design question was whether `PKG_RESOLVES` should be one relationship type per
+epoch (`PKG_RESOLVES_0`, `PKG_RESOLVES_1`, ...) or one type carrying an `epoch` property, filtered
+with `WHERE`. The a priori argument for separate types is that traversal indexes are compiled per
+edge type, so a type holding only one epoch's edges should read faster than one type holding every
+epoch ever written, filtered down on every read.
+
+Measured against a live HydraDB instance (`cmd/probe -only pkgresolves`), planting 24 epochs of 8,000
+edges over 2,000 packages under both designs and timing the single-epoch traversal every observatory
+run actually issues, `MATCH (p)-[:PKG_RESOLVES_N]->(d)` against `MATCH (p)-[r:PKG_RESOLVES]->(d)
+WHERE r.epoch = N`, averaged over 7 repeats after a discarded warmup, three times at increasing
+accumulated scale as the same long-lived instance picked up more data run over run:
+
+| accumulated under the shared type | per-epoch type | epoch property |
+|---|---|---|
+| 8,000 edges | 912 ms | 825 ms |
+| 16,000 edges | 1.549 s | 973 ms |
+| 24,000 edges | 3.779 s | 3.442 s |
+
+The property design read faster every time, by 10 to 37 percent, despite carrying strictly more
+accumulated data in one type across repeated runs than any single per-epoch type ever held. Write
+throughput showed no consistent winner between the two designs, each within the 7,000 to 11,700
+edges/sec range already established for this write path.
+
+**Why this is worth recording rather than trusting the a priori argument.** The compiled-CSC-per-type
+reasoning is a real property of how the engine is documented to work, and it is not wrong in general;
+it just was not the dominant cost here, at this scale, on this HydraDB build. Every fresh per-epoch
+type pays some cost the shared, already-hot type does not, likely from compiling a new type's
+generation from a cold state rather than extending one already warmed by every prior probe run
+against it, and that cost outweighed the filtering the shared design has to do instead. This is
+exactly why the plan deferred the decision to measurement rather than picking from the general
+argument alone.
+
+**Consequence for us.** `PKG_RESOLVES` is one relationship type, `Package -> Package`, carrying an
+`epoch` property, matching finding 21's pattern of writing through UNWIND with the label already
+present. See D46.
+
+---
+
 ## What we changed in our design because of these
 
 | Finding | Design consequence |
@@ -529,3 +569,4 @@ would both turn this from a bisect into a one line fix.
 | 19 | Every read goes over Bolt. HTTP is kept for writes and for reads bounded well under 1,024 rows, and is no longer described as a general fallback |
 | 21 | Every UNWIND vertex upsert SETs a label, even one already present, as a literal chosen by the caller |
 | 20 | Nodes are read through `MSpaths` and `YIELD path`, never projected from a `MATCH`. Distinct counts are taken in Go. Selecting a subset of versions is a separate edge type rather than a predicate, which is also what finding 12 forces |
+| 22 | `PKG_RESOLVES` is one edge type with an `epoch` property, not one type per epoch, measured rather than assumed from the general per-type-index argument |

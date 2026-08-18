@@ -13,6 +13,7 @@
 //  4. How many rows can one read return, and do Bolt and HTTP agree?
 //  5. Can one query traverse edges spanning two cells?
 //  6. What is the sustained write throughput, and at which batch size?
+//  7. PKG_RESOLVES: one edge type per epoch, or one type carrying an epoch property?
 package main
 
 import (
@@ -74,6 +75,7 @@ func main() {
 		{"resultcap", probeResultCap},
 		{"cells", probeCells},
 		{"throughput", probeThroughput},
+		{"pkgresolves", probePkgResolves},
 	}
 
 	ctx := context.Background()
@@ -563,6 +565,139 @@ func probeThroughput(ctx context.Context) error {
 
 		base += int64(edgesPerRun) + 10
 	}
+	return nil
+}
+
+// probePkgResolves answers the step 7 task 9 question by measurement rather than preference: does
+// PKG_RESOLVES get one edge type per epoch, or one type carrying an epoch property? Both designs
+// write through the identical UNWIND path, so the write side is expected to agree; the question is
+// what a single epoch's traversal costs once several epochs have accumulated, since that is the read
+// the observatory actually issues, once per package, once per epoch.
+//
+// A separate type per epoch means the type's compiled CSC generation holds only that epoch's edges.
+// A shared type with a property means the same generation holds every epoch ever written, and a
+// single-epoch read has to filter all of it. The two are planted with the same edge count so the
+// comparison isolates the epoch count already accumulated under the property design, not a
+// difference in workload size.
+func probePkgResolves(ctx context.Context) error {
+	drv, err := neo4j.NewDriverWithContext(boltURI, neo4j.BasicAuth("neo4j", token, ""))
+	if err != nil {
+		return err
+	}
+	defer drv.Close(ctx)
+
+	const packages = 2_000
+	const edgesPerEpoch = 8_000
+	const epochs = 24
+	const base = int64(110_000_000)
+
+	if err := plantVertices(ctx, drv, base, packages); err != nil {
+		return err
+	}
+
+	sess := drv.NewSession(ctx, neo4j.SessionConfig{})
+	defer sess.Close(ctx)
+
+	edgesFor := func(epoch, relBase int64) []any {
+		rows := make([]any, 0, edgesPerEpoch)
+		for i := range edgesPerEpoch {
+			rows = append(rows, map[string]any{
+				"src":   base + int64(i%packages),
+				"dst":   base + (int64(i)+1+epoch)%packages,
+				"rel":   relBase + epoch*int64(edgesPerEpoch) + int64(i),
+				"epoch": epoch,
+			})
+		}
+		return rows
+	}
+
+	// writeEpochs plants every epoch's edges under one statement shape, returning the total time
+	// spent writing, not including vertex planting, which both designs share and is done once above.
+	writeEpochs := func(stmtFor func(epoch int64) string, relBase int64) (time.Duration, error) {
+		var total time.Duration
+		for e := range int64(epochs) {
+			rows := edgesFor(e, relBase)
+			t0 := time.Now()
+			for chunk := range slicesOf(rows, maxBatch) {
+				if werr := write(ctx, sess, stmtFor(e), map[string]any{"rows": chunk}); werr != nil {
+					return 0, fmt.Errorf("epoch %d: %w", e, werr)
+				}
+			}
+			total += time.Since(t0)
+		}
+		return total, nil
+	}
+
+	// Design A: PKG_RESOLVES_0 .. PKG_RESOLVES_5. The type name is interpolated, the same way a
+	// label is: relationship types cannot be parameters in this Cypher subset either.
+	perTypeWrite, err := writeEpochs(func(epoch int64) string {
+		return fmt.Sprintf(`UNWIND $rows AS row
+      MATCH (s:Tp {id: row.src}), (d:Tp {id: row.dst})
+      CREATE (s)-[:PKG_RESOLVES_%d {id: row.rel}]->(d)`, epoch)
+	}, base)
+	if err != nil {
+		return fmt.Errorf("design per-type: %w", err)
+	}
+
+	// Design B: one PKG_RESOLVES_PROP type, epoch carried as a property on every edge.
+	const propStmt = `UNWIND $rows AS row
+    MATCH (s:Tp {id: row.src}), (d:Tp {id: row.dst})
+    CREATE (s)-[:PKG_RESOLVES_PROP {id: row.rel, epoch: row.epoch}]->(d)`
+	propWrite, err := writeEpochs(func(int64) string { return propStmt }, base+10_000_000)
+	if err != nil {
+		return fmt.Errorf("design property: %w", err)
+	}
+
+	// The traversal every observatory run actually issues: everything reachable through one epoch's
+	// edges, queried after every epoch has been written, which is the realistic state for design B
+	// and the only state design A's per-epoch type is ever in. Run once as a warmup, discarded, then
+	// timed repeatedly and averaged: a single measurement over Bolt is noisy enough at this row count
+	// to hide the effect this probe exists to find.
+	const repeats = 7
+	target := int64(epochs / 2)
+	timeQuery := func(stmt string) (int64, time.Duration, error) {
+		var n int64
+		var total time.Duration
+		for i := range repeats + 1 {
+			t0 := time.Now()
+			res, qerr := sess.Run(ctx, stmt, nil)
+			if qerr != nil {
+				return 0, 0, qerr
+			}
+			rec, qerr := res.Single(ctx)
+			if qerr != nil {
+				return 0, 0, qerr
+			}
+			elapsed := time.Since(t0)
+			if i == 0 {
+				// Discard: first call pays session and query-plan warmup cost neither design incurs
+				// again on a subsequent identical statement.
+				continue
+			}
+			n, _ = rec.Values[0].(int64)
+			total += elapsed
+		}
+		return n, total / repeats, nil
+	}
+
+	perTypeCount, perTypeRead, err := timeQuery(fmt.Sprintf(
+		`MATCH (p:Tp)-[:PKG_RESOLVES_%d]->(d) RETURN count(*) AS n`, target))
+	if err != nil {
+		return fmt.Errorf("per-type traversal: %w", err)
+	}
+	propCount, propRead, err := timeQuery(fmt.Sprintf(
+		`MATCH (p:Tp)-[r:PKG_RESOLVES_PROP]->(d) WHERE r.epoch = %d RETURN count(*) AS n`, target))
+	if err != nil {
+		return fmt.Errorf("property traversal: %w", err)
+	}
+
+	fmt.Printf("  %d epochs of %d edges over %d packages, %d accumulated under the shared type\n\n",
+		epochs, edgesPerEpoch, packages, epochs*edgesPerEpoch)
+	fmt.Printf("  design            write edges/s   single-epoch read (avg of %d)   rows\n", repeats)
+	fmt.Printf("  per-epoch type    %11.0f   %24s   %d\n",
+		float64(epochs*edgesPerEpoch)/perTypeWrite.Seconds(), perTypeRead.Round(time.Microsecond), perTypeCount)
+	fmt.Printf("  epoch property    %11.0f   %24s   %d\n",
+		float64(epochs*edgesPerEpoch)/propWrite.Seconds(), propRead.Round(time.Microsecond), propCount)
 	return nil
 }
 
