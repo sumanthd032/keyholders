@@ -49,6 +49,8 @@ func main() {
 		err = runResolve(ctx, os.Args[2:])
 	case "verify":
 		err = runVerify(ctx, os.Args[2:])
+	case "observatory":
+		err = runObservatory(ctx, os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -68,13 +70,14 @@ func usage() {
 	fmt.Fprint(os.Stderr, `keyholders builds and queries the npm keyholder graph.
 
 Commands:
-  scan       audit a lockfile: who can execute code in this project
-  who        what one account reaches, and through which packages
-  path       the concrete chain from a project to what an account controls
-  packages   write the ranked package list the ingest reads
-  ingest     build the package, version and maintainer graph in HydraDB
-  resolve    materialize RESOLVES_TO edges with their validity windows
-  verify     cross-check the graph against deps.dev and rank maintainers by reach
+  scan         audit a lockfile: who can execute code in this project
+  who          what one account reaches, and through which packages
+  path         the concrete chain from a project to what an account controls
+  packages     write the ranked package list the ingest reads
+  ingest       build the package, version and maintainer graph in HydraDB
+  resolve      materialize RESOLVES_TO edges with their validity windows
+  verify       cross-check the graph against deps.dev and rank maintainers by reach
+  observatory  reachability for every maintainer across the whole graph, per epoch
 
 Run a command with -h for its flags.
 `)
