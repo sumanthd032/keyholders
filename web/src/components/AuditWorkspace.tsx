@@ -6,6 +6,7 @@ import type { AuditView, Frontier } from "@/lib/types";
 import { UploadZone } from "./UploadZone";
 import { RollCall } from "./RollCall";
 import { DualCounter } from "./DualCounter";
+import { GraphCanvas } from "./GraphCanvas";
 import { Roster } from "./Roster";
 
 type State =
@@ -121,6 +122,17 @@ export function AuditWorkspace() {
       />
 
       <DualCounter audit={audit} />
+      <GraphCanvas
+        graph={audit.graph}
+        onSelectPackage={(pkg) => {
+          const holder = audit.keyholders.find((k) => k.holds.includes(pkg));
+          if (holder) {
+            document
+              .getElementById(`keyholder-${holder.handle}`)
+              ?.scrollIntoView({ block: "center", behavior: "smooth" });
+          }
+        }}
+      />
       <Roster audit={audit} />
     </div>
   );

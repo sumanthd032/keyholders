@@ -106,6 +106,69 @@ type AuditView struct {
 	Truncated            bool            `json:"truncated"`
 	Kappa                float64         `json:"kappa"`
 	ElapsedMS            int64           `json:"elapsed_ms"`
+	Graph                GraphView       `json:"graph"`
+}
+
+// GraphNodeView is one package the search reached, collapsed from every version of it the search
+// touched: a canvas rendering thousands of individual versions when the interesting unit is which
+// packages are involved would show detail nobody asked for at the cost of the shape they did.
+type GraphNodeView struct {
+	Package    string `json:"package"`
+	Coexistent bool   `json:"coexistent"`
+}
+
+// GraphEdgeView is one resolution edge between two packages, at least one of whose underlying
+// version level edges the search read. Coexistent is true only when both endpoints are themselves
+// coexistence reached; it is an approximation of "this edge lies on a coexistence path", not a
+// per-edge replay of the interval intersection, since Result records maximal intervals per node,
+// not a coexistence flag per traversed edge.
+type GraphEdgeView struct {
+	From       string `json:"from"`
+	To         string `json:"to"`
+	Coexistent bool   `json:"coexistent"`
+}
+
+type GraphView struct {
+	Nodes []GraphNodeView `json:"nodes"`
+	Edges []GraphEdgeView `json:"edges"`
+}
+
+// newGraphView collapses a's version level reach graph to package granularity for the canvas.
+func newGraphView(a Audit) GraphView {
+	coexistent := map[string]bool{}
+	for versionURN := range a.Reach.Coexistence {
+		if pkg := PackageURNOf(versionURN); pkg != "" {
+			coexistent[pkg] = true
+		}
+	}
+
+	nodes := map[string]bool{}
+	for versionURN := range a.Reach.Union {
+		if pkg := PackageURNOf(versionURN); pkg != "" {
+			nodes[pkg] = true
+		}
+	}
+
+	type edgeKey struct{ from, to string }
+	edges := map[edgeKey]bool{}
+	for _, list := range a.Reach.Edges {
+		for _, e := range list {
+			from, to := PackageURNOf(e.From), PackageURNOf(e.To)
+			if from == "" || to == "" || from == to {
+				continue
+			}
+			edges[edgeKey{from, to}] = true
+		}
+	}
+
+	view := GraphView{Nodes: make([]GraphNodeView, 0, len(nodes)), Edges: make([]GraphEdgeView, 0, len(edges))}
+	for pkg := range nodes {
+		view.Nodes = append(view.Nodes, GraphNodeView{Package: pkg, Coexistent: coexistent[pkg]})
+	}
+	for k := range edges {
+		view.Edges = append(view.Edges, GraphEdgeView{From: k.from, To: k.to, Coexistent: coexistent[k.from] && coexistent[k.to]})
+	}
+	return view
 }
 
 // NewAuditView builds the serializable view of a, the single definition the CLI's --json flag and
@@ -122,6 +185,7 @@ func NewAuditView(a Audit, elapsed time.Duration) AuditView {
 		Weights: a.Weights,
 		Depth:   a.Reach.Depth, Truncated: a.Reach.Truncated,
 		Kappa: a.Reach.Kappa, ElapsedMS: elapsed.Milliseconds(),
+		Graph: newGraphView(a),
 	}
 
 	for _, k := range a.Keyholders {

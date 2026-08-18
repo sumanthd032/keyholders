@@ -48,6 +48,22 @@ export type Weights = {
   install_script: number;
 };
 
+export type GraphNode = {
+  package: string;
+  coexistent: boolean;
+};
+
+export type GraphEdge = {
+  from: string;
+  to: string;
+  coexistent: boolean;
+};
+
+export type Graph = {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+};
+
 export type AuditView = {
   project: string;
   format: string;
@@ -67,6 +83,7 @@ export type AuditView = {
   truncated: boolean;
   kappa: number;
   elapsed_ms: number;
+  graph: Graph;
 };
 
 export type Frontier = {
