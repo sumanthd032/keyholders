@@ -18,8 +18,8 @@ type Release struct {
 
 // Dependency is one DEPENDS_ON declaration: a name and the range a version declared for it.
 type Dependency struct {
-	Name  string
-	Range string
+	Name  string `json:"name"`
+	Range string `json:"range"`
 }
 
 // BisectSource supplies what Bisect needs from the graph: a package's publish timeline, which of its
@@ -32,26 +32,27 @@ type BisectSource interface {
 
 // DependencyChange is one declaration whose range moved between two versions of the same package.
 type DependencyChange struct {
-	Name     string
-	From, To string
+	Name string `json:"name"`
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 // DependencyDiff is what changed in a version's declared dependencies relative to the version
 // published immediately before it.
 type DependencyDiff struct {
-	Added   []Dependency
-	Removed []Dependency
-	Changed []DependencyChange
+	Added   []Dependency       `json:"added"`
+	Removed []Dependency       `json:"removed"`
+	Changed []DependencyChange `json:"changed"`
 }
 
 // Introduction is the result of bisecting one advisory's affected versions against a package's
 // publish timeline.
 type Introduction struct {
-	Package       string
-	FirstAffected string
-	PublishedAt   int64
-	Previous      string // empty when FirstAffected is the package's first ever release
-	Diff          DependencyDiff
+	Package       string         `json:"package"`
+	FirstAffected string         `json:"first_affected"`
+	PublishedAt   int64          `json:"published_at"`
+	Previous      string         `json:"previous,omitempty"` // empty when FirstAffected is the first ever release
+	Diff          DependencyDiff `json:"diff"`
 }
 
 // Bisect answers track question two, "which version introduced the vulnerability": the earliest

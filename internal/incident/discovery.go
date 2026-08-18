@@ -12,9 +12,9 @@ import (
 // AdvisoryInfo is enough of an Advisory node to name it and show why it matters, without the caller
 // needing a second read to get a human readable label.
 type AdvisoryInfo struct {
-	ID       string
-	Summary  string
-	Severity string
+	ID       string `json:"id"`
+	Summary  string `json:"summary"`
+	Severity string `json:"severity"`
 }
 
 // AdvisoriesAffecting reads every advisory whose AFFECTS edges cover the named version, anchored at
@@ -49,10 +49,10 @@ func (g GraphSource) AdvisoriesAffecting(ctx context.Context, name, version stri
 // TyposquatNeighbor is one package materially close to the queried one by name, in either direction:
 // something the queried package resembles, or something that resembles the queried package.
 type TyposquatNeighbor struct {
-	Name            string
-	Direction       string // "impersonates" or "impersonated by"
-	Distance        int
-	PopularityRatio float64
+	Name            string  `json:"name"`
+	Direction       string  `json:"direction"` // "impersonates" or "impersonated by"
+	Distance        int     `json:"distance"`
+	PopularityRatio float64 `json:"popularity_ratio"`
 }
 
 // TyposquatsNear reads every TYPOSQUAT_OF edge touching the named package, in both directions: two

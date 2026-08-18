@@ -30,11 +30,11 @@ type LiveSource interface {
 // Exposure is one project that locked a dependent version whose resolution into the compromised
 // version was live at the moment that lockfile was recorded.
 type Exposure struct {
-	Project   string
-	LockedAt  int64
-	Dependent string
-	ValidFrom int64
-	ValidTo   int64
+	Project   string `json:"project"`
+	LockedAt  int64  `json:"locked_at"`
+	Dependent string `json:"dependent"`
+	ValidFrom int64  `json:"valid_from"`
+	ValidTo   int64  `json:"valid_to"`
 }
 
 // ResolvedWhileLive answers track question three, "which applications resolved the compromised

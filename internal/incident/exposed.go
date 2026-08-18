@@ -18,8 +18,8 @@ type RecordedProject struct {
 // ExposedProject is one recorded project whose coexistence-constrained reach, evaluated at the
 // instant its lockfile was recorded, includes the compromised version.
 type ExposedProject struct {
-	Project  string
-	LockedAt int64
+	Project  string `json:"project"`
+	LockedAt int64  `json:"locked_at"`
 }
 
 // ExposureSource supplies what TransitivelyExposed needs beyond query.Auditor: every project this

@@ -20,8 +20,8 @@ type MaintainerSource interface {
 // SharedMaintainer is one other package held, at the queried instant, by an account that also holds
 // the package the incident is about.
 type SharedMaintainer struct {
-	Maintainer string
-	Package    string
+	Maintainer string `json:"maintainer"`
+	Package    string `json:"package"`
 }
 
 // SharedMaintainers answers track question four, "which packages share maintainers or
