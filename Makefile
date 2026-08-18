@@ -4,7 +4,7 @@ SHELL := /bin/bash
 BIN     := bin
 COMPOSE := docker compose -f deploy/docker-compose.yml
 
-.PHONY: help up down logs probe build test lint fmt clean
+.PHONY: help up down logs probe build test lint fmt clean web
 
 help: ## List targets
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) | awk -F':.*?## ' '{printf "  %-10s %s\n", $$1, $$2}'
@@ -43,6 +43,11 @@ lint: ## Vet and, if installed, golangci-lint
 
 fmt: ## Format
 	@gofmt -w $$(find . -name '*.go' -not -path './vendor/*')
+
+web: ## Run the web query API and the Next.js dev server together
+	@trap 'kill $$API_PID 2>/dev/null' EXIT; \
+	go run ./cmd/keyholders serve & API_PID=$$!; \
+	cd web && npm run dev
 
 clean: ## Remove build output and the local HydraDB store
 	@rm -rf $(BIN)
