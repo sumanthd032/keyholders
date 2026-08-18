@@ -55,6 +55,8 @@ func main() {
 		err = runAdvisories(ctx, os.Args[2:])
 	case "typosquats":
 		err = runTyposquats(ctx, os.Args[2:])
+	case "incident":
+		err = runIncident(ctx, os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -84,6 +86,7 @@ Commands:
   observatory  reachability for every maintainer across the whole graph, per epoch
   advisories   ingest OSV's npm feed into Advisory nodes and AFFECTS edges
   typosquats   materialize TYPOSQUAT_OF edges from name similarity and rank
+  incident     the full blast radius report for a package@version
 
 Run a command with -h for its flags.
 `)
