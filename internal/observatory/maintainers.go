@@ -27,18 +27,19 @@ type Aggregator struct {
 // keeps this a merge over results already in hand rather than a walk starting from the maintainer
 // side of the graph, where the set of accounts to start from is unbounded and the direction back to
 // a package's reach is not a single traversal.
-func (a Aggregator) Aggregate(ctx context.Context, packages map[sketch.NodeID]sketch.Sketch, at int64) (map[string]sketch.Sketch, error) {
-	out := make(map[string]sketch.Sketch)
+func (a Aggregator) Aggregate(ctx context.Context, packages map[sketch.NodeID]sketch.Sketch, at int64) (map[sketch.NodeID]sketch.Sketch, error) {
+	out := make(map[sketch.NodeID]sketch.Sketch)
 	for name, pkgSketch := range packages {
 		holders, err := a.Src.Maintainers(ctx, string(name), at)
 		if err != nil {
 			return nil, fmt.Errorf("maintainers of %s: %w", name, err)
 		}
 		for _, handle := range holders {
-			acc, ok := out[handle]
+			id := sketch.NodeID(handle)
+			acc, ok := out[id]
 			if !ok {
 				acc = a.New()
-				out[handle] = acc
+				out[id] = acc
 			}
 			acc.Merge(pkgSketch)
 		}

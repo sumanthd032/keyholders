@@ -57,12 +57,12 @@ func TestAggregateUnionsControlledPackages(t *testing.T) {
 	}
 
 	// azer controls both packages: union of {left-pad, some-cli} and {chalk, some-cli, some-logger}.
-	if want := 4; got["azer"].Count() != want {
-		t.Errorf("azer's reach = %d, want %d (left-pad, chalk, some-cli, some-logger)", got["azer"].Count(), want)
+	if want := 4; got[sketch.NodeID("azer")].Count() != want {
+		t.Errorf("azer's reach = %d, want %d (left-pad, chalk, some-cli, some-logger)", got[sketch.NodeID("azer")].Count(), want)
 	}
 	// sindresorhus controls only chalk.
-	if want := 3; got["sindresorhus"].Count() != want {
-		t.Errorf("sindresorhus's reach = %d, want %d (chalk, some-cli, some-logger)", got["sindresorhus"].Count(), want)
+	if want := 3; got[sketch.NodeID("sindresorhus")].Count() != want {
+		t.Errorf("sindresorhus's reach = %d, want %d (chalk, some-cli, some-logger)", got[sketch.NodeID("sindresorhus")].Count(), want)
 	}
 }
 
@@ -87,10 +87,10 @@ func TestAggregateRespectsHandoverWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Aggregate: %v", err)
 	}
-	if _, ok := before["right9ctrl"]; ok {
+	if _, ok := before[sketch.NodeID("right9ctrl")]; ok {
 		t.Error("right9ctrl should not be credited before the handover")
 	}
-	if got := before["dominictarr"].Count(); got != 2 {
+	if got := before[sketch.NodeID("dominictarr")].Count(); got != 2 {
 		t.Errorf("dominictarr's reach before handover = %d, want 2", got)
 	}
 
@@ -98,10 +98,10 @@ func TestAggregateRespectsHandoverWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Aggregate: %v", err)
 	}
-	if _, ok := after["dominictarr"]; ok {
+	if _, ok := after[sketch.NodeID("dominictarr")]; ok {
 		t.Error("dominictarr should not be credited after handing the package off")
 	}
-	if got := after["right9ctrl"].Count(); got != 2 {
+	if got := after[sketch.NodeID("right9ctrl")].Count(); got != 2 {
 		t.Errorf("right9ctrl's reach after handover = %d, want 2", got)
 	}
 }

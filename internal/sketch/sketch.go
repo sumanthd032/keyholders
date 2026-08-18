@@ -16,8 +16,10 @@ import (
 	"sync"
 )
 
-// NodeID identifies a package for the purposes of propagation. The observatory keys it by the
-// package's graph id; nothing in this package depends on what a node id actually is.
+// NodeID identifies anything this package or the observatory built on top of it tracks a sketch for:
+// a package during propagation, a maintainer handle after aggregation. Nothing here depends on what
+// a node id actually is, which is what lets the same map type flow through propagation and
+// aggregation without a conversion at the boundary.
 type NodeID string
 
 // Edge is one PKG_RESOLVES relationship live during an epoch: From depends on To. Propagation walks
