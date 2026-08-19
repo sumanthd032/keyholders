@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -232,7 +231,6 @@ func reportWeights(w query.Weights) {
 	fmt.Printf("  built from fewer terms is not the same as a low score\n")
 }
 
-
 func percent(part, whole int) string {
 	if whole == 0 {
 		return "0%"
@@ -257,7 +255,7 @@ func showProof(ctx context.Context, auditor *query.Auditor, a query.Audit, want 
 		return fmt.Errorf("no reached version of %q to prove", want)
 	}
 
-	chain, ok, err := auditor.ProofPath(ctx, lockedVersions(a), target, depth)
+	chain, ok, err := auditor.ProofPath(ctx, query.LockedVersions(a), target, depth)
 	if err != nil {
 		return err
 	}
@@ -278,19 +276,6 @@ func showProof(ctx context.Context, auditor *query.Auditor, a query.Audit, want 
 			strings.TrimPrefix(node, "pkg:npm/"), chain.Hops[i-1].Range)
 	}
 	return nil
-}
-
-// lockedVersions is the pins the lockfile named, which are the only honest starting points for a
-// proof. Starting from every reached version instead would satisfy the procedure with a single hop
-// from whatever happens to sit next to the target, and a one-hop chain out of the middle of the tree
-// proves nothing about what this project installs.
-func lockedVersions(a query.Audit) []string {
-	out := make([]string, 0, len(a.Reach.Sources))
-	for _, s := range a.Reach.Sources {
-		out = append(out, s.URN)
-	}
-	sort.Strings(out)
-	return out
 }
 
 func openOrDate(t int64) string {

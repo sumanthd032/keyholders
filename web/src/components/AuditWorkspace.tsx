@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { fetchAudit, streamAudit } from "@/lib/auditStream";
 import { fetchTimeline, type TimelineSample } from "@/lib/timeline";
+import { useRegisterCommands, type Command } from "@/lib/commandRegistry";
 import type { AuditView, Frontier } from "@/lib/types";
 import { UploadZone } from "./UploadZone";
 import { RollCall } from "./RollCall";
@@ -24,6 +25,7 @@ export function AuditWorkspace() {
   const [cutHandle, setCutHandle] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<TimelineSample[]>([]);
   const [selectedAt, setSelectedAt] = useState<number | null>(null);
+  const [file, setFile] = useState<File | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
   const runIdRef = useRef(0);
   const fileRef = useRef<File | null>(null);
@@ -35,6 +37,7 @@ export function AuditWorkspace() {
     const runId = ++runIdRef.current;
 
     fileRef.current = file;
+    setFile(file);
     setCutHandle(null);
     setTimeline([]);
     setSelectedAt(null);
@@ -87,6 +90,33 @@ export function AuditWorkspace() {
     );
   }
 
+  // Registered for as long as this view is mounted, not only while a given phase is active: the
+  // command list itself changes with the phase (there is nothing to skip past before a search
+  // reveals anything), which useRegisterCommands picks up on every call since it replaces its
+  // registration whenever the array identity changes.
+  const viewCommands = useMemo(() => {
+    const cmds: Command[] = [];
+    if (state.phase !== "idle") {
+      cmds.push({
+        id: "audit.new",
+        label: "new audit",
+        hint: "start over with another lockfile",
+        run: () => setState({ phase: "idle" }),
+      });
+    }
+    if (state.phase === "revealing") {
+      const { audit, runId } = state;
+      cmds.push({
+        id: "audit.skip-roll-call",
+        label: "skip roll call",
+        hint: "reveal the roster immediately",
+        run: () => setState({ phase: "done", audit, runId }),
+      });
+    }
+    return cmds;
+  }, [state]);
+  useRegisterCommands(viewCommands);
+
   if (state.phase === "idle") {
     return (
       <div className="flex-1 flex flex-col">
@@ -137,7 +167,7 @@ export function AuditWorkspace() {
 
   return (
     <div className="flex-1 flex flex-col overflow-y-auto">
-      <div className="px-8 pt-6 flex items-baseline justify-between">
+      <div className="px-8 pt-6 flex flex-wrap items-baseline justify-between gap-2">
         <div>
           <h1 className="text-sm text-ramp-100">{audit.project}</h1>
           <p className="tabular text-xs text-ramp-40">
@@ -160,6 +190,11 @@ export function AuditWorkspace() {
       />
 
       <DualCounter audit={audit} />
+      {state.phase === "done" && timeline.length === 0 && (
+        <p className="px-8 py-2 text-[11px] text-ramp-40" aria-live="polite">
+          loading exposure over time...
+        </p>
+      )}
       {timeline.length > 0 && (
         <ExposureRiver samples={timeline} selectedAt={selectedAt} onScrub={scrubTo} />
       )}
@@ -176,7 +211,7 @@ export function AuditWorkspace() {
         }}
       />
       <CutPanel cuts={audit.cuts} selected={cutHandle} onSelect={setCutHandle} />
-      <Roster audit={audit} />
+      <Roster audit={audit} file={file} at={selectedAt} />
     </div>
   );
 }

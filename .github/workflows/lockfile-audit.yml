@@ -1,0 +1,73 @@
+name: lockfile audit
+
+# Fails the build when a lockfile change either introduces a live path to a known advisory or adds a
+# new keyholder, an account that can now publish code into the dependency tree, relative to the base
+# branch. Runs against this repository's own web/package-lock.json, since that is the one lockfile
+# this repository itself depends on; the same job works against any package-lock.json by changing the
+# path filter and the LOCKFILE env below.
+#
+# This spins up a real HydraDB and ingests only the packages the target lockfile names, live from the
+# npm registry and deps.dev, rather than assuming a pre-populated graph. That network fetch, plus the
+# OSV bulk feed download the advisory check needs, is the dominant cost of this job; the registry
+# response cache and OSV feed cache are kept across runs to keep it from paying that cost every time.
+
+on:
+  pull_request:
+    paths:
+      - "web/package-lock.json"
+
+env:
+  LOCKFILE: web/package-lock.json
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out the pull request
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: set up go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: cache registry and advisory feed responses
+        uses: actions/cache@v4
+        with:
+          path: var/cache
+          key: keyholders-cache-${{ github.event.pull_request.base.sha }}
+          restore-keys: |
+            keyholders-cache-
+
+      - name: start hydradb
+        run: make up
+
+      - name: build keyholders
+        run: go build -o bin/keyholders ./cmd/keyholders
+
+      - name: extract the base lockfile
+        run: git show "origin/${{ github.event.pull_request.base.ref }}:${{ env.LOCKFILE }}" > base-lockfile.json
+
+      - name: scope the package list to what these two lockfiles actually name
+        run: |
+          { bash scripts/ci/lockfile_packages.sh "$LOCKFILE"; bash scripts/ci/lockfile_packages.sh base-lockfile.json; } \
+            | sort -u > packages.txt
+          wc -l packages.txt
+
+      - name: ingest the scoped package graph
+        run: ./bin/keyholders ingest -packages packages.txt
+
+      - name: materialize resolution edges
+        run: ./bin/keyholders resolve -packages packages.txt
+
+      - name: ingest the OSV advisory feed
+        run: ./bin/keyholders advisories
+
+      - name: check the lockfile
+        run: ./bin/keyholders ci-check -base base-lockfile.json "$LOCKFILE"
+
+      - name: hydradb logs on failure
+        if: failure()
+        run: docker compose -f deploy/docker-compose.yml logs --tail 200

@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 )
@@ -103,6 +104,81 @@ func (a *Auditor) ProofPath(ctx context.Context, sources []string, target string
 		}
 	}
 	return best, found, nil
+}
+
+// PackageChain pairs one package a handle holds with the proof that the project reaches it, or its
+// absence when no coexistence path exists within the depth bound. A missing chain is returned rather
+// than dropped: the roster already says this account holds the package, so a proof that cannot be
+// produced is itself worth showing.
+type PackageChain struct {
+	Package string
+	Chain   Chain
+	Found   bool
+}
+
+// LockedVersions is the pins the lockfile named, the only honest starting points for a proof.
+// Starting from every reached version instead would let the procedure close a path from whatever
+// happens to sit next to the target, and a one-hop chain out of the middle of the tree proves
+// nothing about what this project installs.
+func LockedVersions(a Audit) []string {
+	out := make([]string, 0, len(a.Reach.Sources))
+	for _, s := range a.Reach.Sources {
+		out = append(out, s.URN)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// HeldPackages lists the packages a handle can publish to within one audit, widest reach first, so
+// a caller asking for one chain by default gets the one to the package that matters most.
+func HeldPackages(a Audit, handle string) ([]string, bool) {
+	for _, k := range a.Keyholders {
+		if k.Handle != handle {
+			continue
+		}
+		held := make([]string, 0, len(k.Through))
+		for pkg := range k.Through {
+			held = append(held, pkg)
+		}
+		sort.Strings(held)
+		return held, len(held) > 0
+	}
+	return nil, false
+}
+
+// HolderChains proves, for each named package, the shortest coexistence chain from what the project
+// actually locked to some version of it the project reaches. Used by both the CLI's path command and
+// the audit path API endpoint, so the two surfaces cannot drift on what counts as a proof.
+func (a *Auditor) HolderChains(ctx context.Context, audit Audit, packages []string, depth int) ([]PackageChain, error) {
+	sources := LockedVersions(audit)
+
+	// The reached versions of each package, so a proof can be asked for against a concrete version
+	// rather than against the package, which the procedure has no way to search for.
+	reached := map[string][]string{}
+	for urn := range audit.Reach.Coexistence {
+		if pkg := PackageURNOf(urn); pkg != "" {
+			reached[pkg] = append(reached[pkg], urn)
+		}
+	}
+
+	out := make([]PackageChain, 0, len(packages))
+	for _, pkg := range packages {
+		versions := reached[pkg]
+		sort.Strings(versions)
+
+		c := PackageChain{Package: pkg}
+		for _, target := range versions {
+			found, ok, err := a.ProofPath(ctx, sources, target, depth)
+			if err != nil {
+				return nil, err
+			}
+			if ok && (!c.Found || len(found.Hops) < len(c.Chain.Hops)) {
+				c.Chain, c.Found = found, true
+			}
+		}
+		out = append(out, c)
+	}
+	return out, nil
 }
 
 // coexistenceChain converts a returned path into a chain, reporting whether its edges share an

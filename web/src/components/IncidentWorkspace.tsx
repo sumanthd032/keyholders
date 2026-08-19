@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { API_BASE } from "@/lib/sse";
 import { streamIncidentTraversal } from "@/lib/incidentStream";
+import { useRegisterCommands, type Command } from "@/lib/commandRegistry";
 import { packageURNOf } from "@/lib/types";
 import type {
   Frontier,
@@ -31,6 +32,7 @@ export function IncidentWorkspace() {
   const [project, setProject] = useState("");
   const [report, setReport] = useState<IncidentView | null>(null);
   const [reportError, setReportError] = useState<string | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
   const [traversal, setTraversal] = useState<TraversalState>({ phase: "idle" });
   const controllerRef = useRef<AbortController | null>(null);
 
@@ -53,12 +55,15 @@ export function IncidentWorkspace() {
   async function loadReport(name: string, version: string) {
     setReport(null);
     setReportError(null);
+    setReportLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/incident/${name}/${version}`);
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
       setReport((await res.json()) as IncidentView);
     } catch (err) {
       setReportError(String(err));
+    } finally {
+      setReportLoading(false);
     }
   }
 
@@ -99,6 +104,22 @@ export function IncidentWorkspace() {
       setTraversal({ phase: "error", message: String(err) });
     });
   }
+
+  const canWatch = Boolean(parseTarget() && project);
+  const viewCommands = useMemo(() => {
+    if (!canWatch) return [];
+    const cmds: Command[] = [
+      {
+        id: "incident.watch",
+        label: "watch live traversal",
+        hint: `${target} against ${project}`,
+        run: () => watch(),
+      },
+    ];
+    return cmds;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canWatch, target, project]);
+  useRegisterCommands(viewCommands);
 
   return (
     <div className="flex-1 flex flex-col overflow-y-auto">
@@ -175,7 +196,16 @@ export function IncidentWorkspace() {
       )}
 
       <div className="px-8 py-6 flex flex-col gap-8">
-        {reportError && <p className="text-sm text-danger">{reportError}</p>}
+        {reportLoading && (
+          <p className="text-xs text-ramp-40" aria-live="polite">
+            loading blast radius report...
+          </p>
+        )}
+        {reportError && (
+          <p className="text-sm text-danger" role="alert">
+            {reportError}
+          </p>
+        )}
         {report && (
           <>
             <Section title="advisories">
