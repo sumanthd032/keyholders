@@ -1,0 +1,103 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens. Values chosen and verified against WCAG contrast ratios (computed against ground
+ * and both surface elevations, not eyeballed) before any component used them.
+ *
+ * ramp-40 is the dimmest ramp step still guaranteed to clear 4.5:1 (AA, normal text) against ground.
+ * ramp-20 intentionally does not: it exists for disabled states, which WCAG does not require to meet
+ * text contrast, and treating it as a text color anywhere else is a bug.
+ */
+:root {
+  --ground: #0a0c10;
+  --surface-1: #12151a;
+  --surface-2: #1a1e25;
+
+  --ramp-100: #f2f3f5;
+  --ramp-80: #c7cad1;
+  --ramp-60: #9aa0ab;
+  --ramp-40: #767c89;
+  --ramp-20: #454952;
+
+  /* Signal: the one hot accent for focus, selection, and a live query in progress. Cyan rather than
+     HydraDB's orange, on the opposite side of the wheel, so it can never read as a copy of theirs. */
+  --signal: #3fd9ff;
+  --signal-dim: #1b6f80;
+
+  /* Danger is reserved exclusively for confirmed compromise and advisory severity. It must never be
+     reused for ordinary emphasis: the day it appears for decoration is the day it stops meaning
+     "something is actually wrong." */
+  --danger: #ff4d6d;
+  --danger-dim: #7a2433;
+
+  /* Positive is used only for "no exposure found" and resolved states, never as a general-purpose
+     accent, so seeing it always means the specific thing it says it means. */
+  --positive: #34d399;
+  --positive-dim: #195c44;
+
+  /* Two hairline weights, both low opacity so they read as instrument rules rather than boxes. */
+  --rule-1: rgba(242, 243, 245, 0.08);
+  --rule-2: rgba(242, 243, 245, 0.16);
+}
+
+@theme inline {
+  --color-ground: var(--ground);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+
+  --color-ramp-100: var(--ramp-100);
+  --color-ramp-80: var(--ramp-80);
+  --color-ramp-60: var(--ramp-60);
+  --color-ramp-40: var(--ramp-40);
+  --color-ramp-20: var(--ramp-20);
+
+  --color-signal: var(--signal);
+  --color-signal-dim: var(--signal-dim);
+  --color-danger: var(--danger);
+  --color-danger-dim: var(--danger-dim);
+  --color-positive: var(--positive);
+  --color-positive-dim: var(--positive-dim);
+
+  --color-rule-1: var(--rule-1);
+  --color-rule-2: var(--rule-2);
+
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-display: var(--font-display);
+}
+
+/* No prefers-color-scheme fork: an instrument reads one way, not two. The near-black ground is the
+   design, not a dark-mode variant of something else. */
+body {
+  background: var(--ground);
+  color: var(--ramp-100);
+  font-family: var(--font-sans);
+}
+
+/* Every numeral, identifier, version, hash, and path renders monospace with tabular figures, so
+   columns align and digits do not jitter when a value updates during a live query. */
+.tabular {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The headline count is the one place the pixel/grid display face appears. Using it anywhere else
+   would turn a signature moment into decoration repeated until it stops meaning anything. */
+.display-numeral {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
