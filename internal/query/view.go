@@ -60,17 +60,17 @@ type TermView struct {
 // KeyholderView is one ranked account, decomposed the way the risk score itself is: every term
 // individually inspectable, per the project's own transparency requirement on the score.
 type KeyholderView struct {
-	Handle        string        `json:"handle"`
-	Packages      int           `json:"packages"`
-	Holds         []string      `json:"holds"`
-	Since         int64         `json:"since,omitempty"`
-	Risk          float64       `json:"risk"`
-	Terms         []TermView    `json:"risk_terms"`
-	Solo          FractionView  `json:"solo"`
-	NoProvenance  FractionView  `json:"no_provenance"`
-	InstallScript FractionView  `json:"install_script"`
-	LastPublish   int64         `json:"last_publish,omitempty"`
-	LastRelease   int64         `json:"last_release,omitempty"`
+	Handle        string       `json:"handle"`
+	Packages      int          `json:"packages"`
+	Holds         []string     `json:"holds"`
+	Since         int64        `json:"since,omitempty"`
+	Risk          float64      `json:"risk"`
+	Terms         []TermView   `json:"risk_terms"`
+	Solo          FractionView `json:"solo"`
+	NoProvenance  FractionView `json:"no_provenance"`
+	InstallScript FractionView `json:"install_script"`
+	LastPublish   int64        `json:"last_publish,omitempty"`
+	LastRelease   int64        `json:"last_release,omitempty"`
 }
 
 // CutView is one removal analysis result: what is lost if this account is taken out.

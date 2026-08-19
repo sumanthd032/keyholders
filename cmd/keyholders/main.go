@@ -59,6 +59,8 @@ func main() {
 		err = runIncident(ctx, os.Args[2:])
 	case "serve":
 		err = runServe(ctx, os.Args[2:])
+	case "ci-check":
+		err = runCICheck(ctx, os.Args[2:])
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -90,6 +92,7 @@ Commands:
   typosquats   materialize TYPOSQUAT_OF edges from name similarity and rank
   incident     the full blast radius report for a package@version
   serve        serve the web API the Next.js interface talks to
+  ci-check     fail if a lockfile has a live advisory path, or adds a keyholder vs -base
 
 Run a command with -h for its flags.
 `)

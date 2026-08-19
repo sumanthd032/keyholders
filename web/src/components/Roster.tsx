@@ -1,4 +1,6 @@
+import { Fragment, useState } from "react";
 import type { AuditView } from "@/lib/types";
+import { PathInspector } from "./PathInspector";
 
 function fraction(f: { count: number; of: number; known: boolean }): string {
   return f.known ? `${f.count}/${f.of}` : "-";
@@ -15,8 +17,17 @@ function day(t?: number): string {
  * also needs an equivalent of, and it is also what gets pasted into an incident channel, so it is
  * built first rather than as an accessibility afterthought.
  */
-export function Roster({ audit }: { audit: AuditView }) {
+export function Roster({
+  audit,
+  file,
+  at,
+}: {
+  audit: AuditView;
+  file: File | null;
+  at: number | null;
+}) {
   const irreplaceable = audit.cuts.filter((c) => c.irreplaceable);
+  const [proving, setProving] = useState<string | null>(null);
 
   return (
     <div className="px-8 py-6 flex flex-col gap-8">
@@ -37,15 +48,34 @@ export function Roster({ audit }: { audit: AuditView }) {
             </thead>
             <tbody>
               {audit.keyholders.map((k) => (
-                <tr key={k.handle} id={`keyholder-${k.handle}`} className="border-b border-rule-1/50">
-                  <td className="py-2 pr-4 text-ramp-100">{k.handle}</td>
-                  <td className="py-2 pr-4 text-ramp-100">{k.risk.toFixed(2)}</td>
-                  <td className="py-2 pr-4 text-ramp-60">{k.packages}</td>
-                  <td className="py-2 pr-4 text-ramp-60">{fraction(k.solo)}</td>
-                  <td className="py-2 pr-4 text-ramp-60">{fraction(k.no_provenance)}</td>
-                  <td className="py-2 pr-4 text-ramp-60">{fraction(k.install_script)}</td>
-                  <td className="py-2 pr-4 text-ramp-60">{day(k.since)}</td>
-                </tr>
+                <Fragment key={k.handle}>
+                  <tr id={`keyholder-${k.handle}`} className="border-b border-rule-1/50">
+                    <td className="py-2 pr-4 text-ramp-100">
+                      {k.handle}
+                      {file && (
+                        <button
+                          onClick={() => setProving(proving === k.handle ? null : k.handle)}
+                          className="ml-2 text-[10px] text-ramp-40 hover:text-signal underline underline-offset-2"
+                        >
+                          {proving === k.handle ? "hide proof" : "prove"}
+                        </button>
+                      )}
+                    </td>
+                    <td className="py-2 pr-4 text-ramp-100">{k.risk.toFixed(2)}</td>
+                    <td className="py-2 pr-4 text-ramp-60">{k.packages}</td>
+                    <td className="py-2 pr-4 text-ramp-60">{fraction(k.solo)}</td>
+                    <td className="py-2 pr-4 text-ramp-60">{fraction(k.no_provenance)}</td>
+                    <td className="py-2 pr-4 text-ramp-60">{fraction(k.install_script)}</td>
+                    <td className="py-2 pr-4 text-ramp-60">{day(k.since)}</td>
+                  </tr>
+                  {proving === k.handle && file && (
+                    <tr className="border-b border-rule-1/50">
+                      <td colSpan={7} className="py-2 pr-4">
+                        <PathInspector file={file} handle={k.handle} packages={k.holds} at={at} />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               ))}
             </tbody>
           </table>

@@ -4,7 +4,7 @@ import { IncidentWorkspace } from "@/components/IncidentWorkspace";
 export default function IncidentPage() {
   return (
     <main className="flex-1 flex flex-col">
-      <header className="border-b border-rule-1 px-8 py-6 flex items-baseline justify-between">
+      <header className="border-b border-rule-1 px-8 py-6 flex flex-wrap items-baseline justify-between gap-3">
         <div>
           <h1 className="text-sm font-medium tracking-wide text-ramp-100">keyholders / incident</h1>
           <p className="tabular text-xs text-ramp-40 mt-1">

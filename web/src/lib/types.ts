@@ -144,6 +144,28 @@ export type IncidentView = {
   typosquats: TyposquatNeighbor[];
 };
 
+export type Hop = {
+  from: string;
+  to: string;
+  range: string;
+  valid_from: number;
+  valid_to: number;
+};
+
+export type Chain = {
+  package: string;
+  found: boolean;
+  valid_from?: number;
+  valid_to?: number;
+  hops?: Hop[];
+};
+
+export type PathView = {
+  handle: string;
+  holds: string[];
+  chains: Chain[];
+};
+
 export type IncidentTraversalDone = {
   audit: AuditView;
   target: string;
