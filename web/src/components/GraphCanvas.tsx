@@ -91,7 +91,14 @@ export function GraphCanvas({
     [graph.edges],
   );
 
-  if (nodes.length === 0) return null;
+  if (nodes.length === 0) {
+    return (
+      <div className="px-8 py-6">
+        <h2 className="text-xs uppercase tracking-wide text-ramp-40 mb-1">reach graph</h2>
+        <p className="text-xs text-ramp-60">nothing reached, so there is no graph to draw</p>
+      </div>
+    );
+  }
 
   return (
     <div className="px-8 py-6">

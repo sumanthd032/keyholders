@@ -2,15 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useRegisteredCommands, type Command } from "@/lib/commandRegistry";
 
-type Command = {
-  id: string;
-  label: string;
-  hint: string;
-  run: (router: ReturnType<typeof useRouter>) => void;
-};
-
-const commands: Command[] = [
+const navCommands: Command[] = [
   { id: "audit", label: "go to audit", hint: "upload a lockfile", run: (r) => r.push("/") },
   {
     id: "incident",
@@ -29,10 +23,10 @@ const commands: Command[] = [
 /**
  * The whole tool operable from the keyboard, not only each view's own controls: Cmd/Ctrl+K opens a
  * filterable list of commands, arrow keys move through it, Enter runs the highlighted one, Escape
- * closes it. Scoped to navigation for now, the one action every view shares; a per-view command,
- * "new audit", "skip roll call", would need each view to register into a shared command registry
- * rather than this component knowing about every view's internals, which is a real gap, not
- * something this claims to solve.
+ * closes it. Navigation is fixed and always present; per-view actions ("new audit", "skip roll
+ * call") come from whichever view is currently mounted, through the shared command registry each
+ * view registers into with useRegisterCommands, so this component never has to know any view's
+ * internals to offer its actions.
  */
 export function CommandPalette() {
   const [open, setOpen] = useState(false);
@@ -40,7 +34,9 @@ export function CommandPalette() {
   const [highlighted, setHighlighted] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
+  const viewCommands = useRegisteredCommands();
 
+  const commands = [...navCommands, ...viewCommands];
   const filtered = commands.filter((c) => c.label.includes(query.toLowerCase()));
 
   useEffect(() => {

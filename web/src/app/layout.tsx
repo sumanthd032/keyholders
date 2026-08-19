@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, VT323 } from "next/font/google";
 import { CommandPalette } from "@/components/CommandPalette";
+import { CommandRegistryProvider } from "@/lib/commandRegistry";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -33,8 +34,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       className={`${geistSans.variable} ${geistMono.variable} ${display.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col bg-ground text-ramp-100">
-        {children}
-        <CommandPalette />
+        <CommandRegistryProvider>
+          {children}
+          <CommandPalette />
+        </CommandRegistryProvider>
       </body>
     </html>
   );
