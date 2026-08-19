@@ -552,6 +552,49 @@ present. See D46.
 
 ---
 
+## 23. A self loop is rejected when both endpoints reuse one `MATCH` variable, accepted when they are two
+
+The KRI-over-time curve needs one relationship per epoch from a `Package` or `Maintainer` node back to
+itself, the same "one type, `epoch` property" shape finding 22 already validated for `PKG_RESOLVES`,
+just with the source and destination being the same node. The obvious statement:
+
+```cypher
+UNWIND $rows AS row
+MATCH (n:Package {id: row.id})
+MERGE (n)-[r:KRI_AT {id: row.edge_id}]->(n)
+SET r.epoch = row.epoch, r.kri = row.kri
+-> invalid_request
+   OpenCypher query is not supported yet: UNWIND MATCH MERGE requires exactly two endpoint nodes
+```
+
+is rejected outright, reusing one bound variable as both ends of the relationship. Matching the same
+node twice under two separate variables passes and behaves exactly as expected, including on read back:
+
+```cypher
+UNWIND $rows AS row
+MATCH (n1:Package {id: row.id}), (n2:Package {id: row.id})
+MERGE (n1)-[r:KRI_AT {id: row.edge_id}]->(n2)
+SET r.epoch = row.epoch, r.kri = row.kri
+```
+
+Confirmed live: writing one row this way, then reading it back with
+`MATCH (n:Package {id: $id})-[r:KRI_AT]->(m:Package {id: $id}) RETURN r.epoch, r.kri` returned the
+written values. Minimal reproduction kept as `cmd/probe-selfloop` during this check, not committed.
+
+**Why this is worth recording rather than assuming self loops are unsupported.** The error text talks
+about endpoint count, not about self loops as a concept, which reads like a syntactic check on the
+pattern (two distinct variable bindings in the `MERGE` clause) rather than a semantic one on whether
+the two ends are allowed to resolve to the same physical node. Concluding "self loops are not
+supported" from the first error would have been wrong and would have pushed the KRI history design
+toward a needless second node type.
+
+**Consequence for us.** `KRI_AT`, the per-epoch KRI history edge, matches each node twice under
+distinct variables in its `MATCH` before the `MERGE`, one relationship type, `Package -> Package` or
+`Maintainer -> Maintainer`, self loop, carrying `epoch` and `kri`, edge id keyed on `(node, epoch)` the
+same way `PKG_RESOLVES` is keyed on `(src, dst, epoch)`.
+
+---
+
 ## What we changed in our design because of these
 
 | Finding | Design consequence |
@@ -570,3 +613,4 @@ present. See D46.
 | 21 | Every UNWIND vertex upsert SETs a label, even one already present, as a literal chosen by the caller |
 | 20 | Nodes are read through `MSpaths` and `YIELD path`, never projected from a `MATCH`. Distinct counts are taken in Go. Selecting a subset of versions is a separate edge type rather than a predicate, which is also what finding 12 forces |
 | 22 | `PKG_RESOLVES` is one edge type with an `epoch` property, not one type per epoch, measured rather than assumed from the general per-type-index argument |
+| 23 | `KRI_AT` self loops match each endpoint under its own `MATCH` variable rather than reusing one binding twice |

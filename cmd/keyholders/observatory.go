@@ -108,20 +108,34 @@ func runObservatory(ctx context.Context, args []string) error {
 	elapsed := time.Since(started)
 
 	latest := runs[len(runs)-1]
+	pkgURN := func(id sketch.NodeID) string { return graph.PackageURN("npm", string(id)) }
+	mntURN := func(id sketch.NodeID) string { return graph.MaintainerURN("npm", string(id)) }
 
 	if *writeGraph {
-		pkgWritten, err := observatory.WriteBack(ctx, db, latest.packages, latest.epoch, "Package",
-			func(id sketch.NodeID) string { return graph.PackageURN("npm", string(id)) }, *batch)
+		pkgWritten, err := observatory.WriteBack(ctx, db, latest.packages, latest.epoch, "Package", pkgURN, *batch)
 		if err != nil {
 			return fmt.Errorf("write back package kri: %w", err)
 		}
-		mntWritten, err := observatory.WriteBack(ctx, db, latest.maintainers, latest.epoch, "Maintainer",
-			func(id sketch.NodeID) string { return graph.MaintainerURN("npm", string(id)) }, *batch)
+		mntWritten, err := observatory.WriteBack(ctx, db, latest.maintainers, latest.epoch, "Maintainer", mntURN, *batch)
 		if err != nil {
 			return fmt.Errorf("write back maintainer kri: %w", err)
 		}
 		fmt.Fprintf(os.Stderr, "wrote kri to %d packages and %d maintainers, epoch %s\n",
 			pkgWritten, mntWritten, epochDate(latest.epoch))
+
+		// Every epoch's value, not only the latest, so the curve and the orphaned flag both survive
+		// past this run rather than being recomputed from scratch each time something wants to read
+		// them (see finding 23 for why a self loop is the shape, and D44's note that this was left
+		// open until the per-node scalar property stopped being enough).
+		for _, run := range runs {
+			if _, err := observatory.WriteKRIHistory(ctx, db, run.packages, run.orphaned, run.epoch, "Package", pkgURN, *batch); err != nil {
+				return fmt.Errorf("write kri history for packages, epoch %d: %w", run.epoch, err)
+			}
+			if _, err := observatory.WriteKRIHistory(ctx, db, run.maintainers, nil, run.epoch, "Maintainer", mntURN, *batch); err != nil {
+				return fmt.Errorf("write kri history for maintainers, epoch %d: %w", run.epoch, err)
+			}
+		}
+		fmt.Fprintf(os.Stderr, "wrote kri history across %d epochs\n", len(runs))
 	}
 
 	reportObservatory(runs, elapsed, len(names), *top)
