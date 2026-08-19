@@ -43,6 +43,7 @@ export function CommandRegistryProvider({ children }: { children: ReactNode }) {
         delete next[key];
         return next;
       }
+      if (prev[key] === commands) return prev;
       return { ...prev, [key]: commands };
     });
   }, []);
@@ -69,10 +70,15 @@ export function useRegisteredCommands(): Command[] {
 export function useRegisterCommands(commands: Command[]): void {
   const ctx = useContext(RegistryContext);
   const key = useId();
+  // Depend on setRegistration itself, not the context object: the object is rebuilt by the
+  // provider's useMemo every time `registrations` changes, which is exactly what this effect's own
+  // body does. Depending on `ctx` would make the effect re-fire on its own state change, running the
+  // cleanup (remove) and then the effect (add) forever. setRegistration's identity never changes.
+  const setRegistration = ctx?.setRegistration;
 
   useEffect(() => {
-    if (!ctx) return;
-    ctx.setRegistration(key, commands);
-    return () => ctx.setRegistration(key, []);
-  }, [ctx, key, commands]);
+    if (!setRegistration) return;
+    setRegistration(key, commands);
+    return () => setRegistration(key, []);
+  }, [setRegistration, key, commands]);
 }
