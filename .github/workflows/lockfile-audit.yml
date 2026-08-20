@@ -48,11 +48,11 @@ jobs:
         run: go build -o bin/keyholders ./cmd/keyholders
 
       - name: extract the base lockfile
-        run: git show "origin/${{ github.event.pull_request.base.ref }}:${{ env.LOCKFILE }}" > base-lockfile.json
+        run: git show "origin/${{ github.event.pull_request.base.ref }}:${{ env.LOCKFILE }}" > base-package-lock.json
 
       - name: scope the package list to what these two lockfiles actually name
         run: |
-          { bash scripts/ci/lockfile_packages.sh "$LOCKFILE"; bash scripts/ci/lockfile_packages.sh base-lockfile.json; } \
+          { bash scripts/ci/lockfile_packages.sh "$LOCKFILE"; bash scripts/ci/lockfile_packages.sh base-package-lock.json; } \
             | sort -u > packages.txt
           wc -l packages.txt
 
@@ -66,7 +66,7 @@ jobs:
         run: ./bin/keyholders advisories
 
       - name: check the lockfile
-        run: ./bin/keyholders ci-check -base base-lockfile.json "$LOCKFILE"
+        run: ./bin/keyholders ci-check -base base-package-lock.json "$LOCKFILE"
 
       - name: hydradb logs on failure
         if: failure()
