@@ -75,6 +75,19 @@ func withLogging(next http.Handler) http.Handler {
 	})
 }
 
+// orEmpty converts a nil slice to an empty one so it marshals as [] rather than null. The engines
+// return nil when a search finds nothing, which is ordinary Go, but every view struct here declares
+// its fields as JSON arrays and the clients index them directly: a null reached the incident view as
+// `report.exposed.length` on a package no recorded project depends on, which threw and took the whole
+// render down. Applied at the boundary that declares the contract rather than in the engines, whose
+// nil-means-empty return is correct for their own callers.
+func orEmpty[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

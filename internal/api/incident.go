@@ -67,8 +67,8 @@ func (s *Server) handleIncident(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, IncidentView{
 		Package: name, Version: version,
-		Advisories: advisories, Introductions: introductions,
-		Exposed: exposed, ResolvedLive: live,
-		Shared: shared, Typosquats: typosquats,
+		Advisories: orEmpty(advisories), Introductions: introductions,
+		Exposed: orEmpty(exposed), ResolvedLive: orEmpty(live),
+		Shared: orEmpty(shared), Typosquats: orEmpty(typosquats),
 	})
 }
