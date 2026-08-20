@@ -44,8 +44,16 @@ type PathView struct {
 	Chains []ChainView `json:"chains"`
 }
 
+// Both slices are built empty rather than left nil, so a handle that holds nothing serializes as []
+// and not null. The browser indexes chains directly to read the first proof, and a null there threw
+// before it could check for emptiness, taking the whole render down instead of showing "no chain".
 func NewPathView(handle string, held []string, chains []PackageChain) PathView {
-	view := PathView{Handle: handle, Holds: held}
+	view := PathView{
+		Handle: handle,
+		Holds:  make([]string, 0, len(held)),
+		Chains: make([]ChainView, 0, len(chains)),
+	}
+	view.Holds = append(view.Holds, held...)
 	for _, c := range chains {
 		view.Chains = append(view.Chains, NewChainView(c))
 	}

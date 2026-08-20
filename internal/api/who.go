@@ -26,7 +26,8 @@ type WhoView struct {
 func newWhoView(w query.Who) WhoView {
 	view := WhoView{
 		Handle:          w.Handle,
-		Dependents:      w.Dependents,
+		Holds:           make([]HeldView, 0, len(w.Holds)),
+		Dependents:      orEmpty(w.Dependents),
 		DependentCount:  len(w.Dependents),
 		UnionDependents: w.UnionDependents,
 	}
